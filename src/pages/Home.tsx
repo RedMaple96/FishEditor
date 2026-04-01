@@ -1,13 +1,16 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { MousePointer2, MousePointerClick, PenTool, Trash2, Download, Settings, Copy, Check, Fish, Undo, Redo, FlipHorizontal, FlipVertical, Repeat, FileDown, ImageDown } from 'lucide-react';
+import { MousePointer2, MousePointerClick, PenTool, Trash2, Download, Settings, Copy, Check, Fish, Undo, Redo, FlipHorizontal, FlipVertical, Repeat, FileDown, ImageDown, Play, Square, ChevronDown, ChevronRight } from 'lucide-react';
 import { Point, PathPoint, douglasPeucker, calculateAngles, bezierSpline, resamplePath, resampleSegment } from '../utils/path';
 
 // 定义绘制模式
-type DrawMode = 'freehand' | 'keypoint' | 'select';
+type DrawMode = 'freehand' | 'keypoint';
 
 export default function Home() {
   // 画布尺寸设置
   const [resolution, setResolution] = useState({ width: 1280, height: 720 });
+  const [isResolutionSettingsOpen, setIsResolutionSettingsOpen] = useState(false);
+  const [isDrawSettingsOpen, setIsDrawSettingsOpen] = useState(true);
+  const [isExportSettingsOpen, setIsExportSettingsOpen] = useState(true);
   
   // 核心状态
   const [mode, setMode] = useState<DrawMode>('freehand');
@@ -117,6 +120,13 @@ export default function Home() {
   const [pathData, setPathData] = useState<PathPoint[]>([]);
   const [isCopied, setIsCopied] = useState(false);
   const [exportFilename, setExportFilename] = useState('path00001');
+
+  // 模拟游动状态
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playSpeed, setPlaySpeed] = useState(10); // 游动速度（数值越大越快，1表示点到点1秒）
+  const playProgressRef = useRef(0); // 当前播放进度（在 0 到 pathData.length - 1 之间）
+  const lastTimeRef = useRef<number>(0);
+  const animationFrameRef = useRef<number>();
 
   // 画布和容器引用
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -299,9 +309,101 @@ export default function Home() {
       }
     });
 
+    // 绘制游动的模拟鱼
+    if (isPlaying && pathData.length > 1) {
+      const progress = playProgressRef.current;
+      const index = Math.floor(progress);
+      const nextIndex = Math.min(index + 1, pathData.length - 1);
+      const t = progress - index; // 在两点之间的进度 (0 ~ 1)
+
+      const p1 = pathData[index];
+      const p2 = pathData[nextIndex];
+
+      // 线性插值计算当前位置和角度
+      const currentX = p1.x + (p2.x - p1.x) * t;
+      const currentY = p1.y + (p2.y - p1.y) * t;
+      
+      // 处理角度的插值（考虑到 360 度循环的情况）
+      let a1 = p1.angle;
+      let a2 = p2.angle;
+      let diff = a2 - a1;
+      while (diff < -180) diff += 360;
+      while (diff > 180) diff -= 360;
+      const currentAngle = a1 + diff * t;
+
+      // 绘制鱼本体
+      ctx.save();
+      ctx.translate(currentX, currentY);
+      // Canvas 翻转系下，角度取反
+      ctx.rotate(-currentAngle * (Math.PI / 180));
+      
+      // 发光外圈
+      ctx.beginPath();
+      ctx.shadowColor = '#fbbf24';
+      ctx.shadowBlur = 15 / scale;
+      ctx.fillStyle = '#fbbf24';
+      
+      // 画一个简单的鱼的形状（水滴状/椭圆）
+      ctx.ellipse(0, 0, 15 / scale, 8 / scale, 0, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // 画鱼尾巴
+      ctx.beginPath();
+      ctx.moveTo(-10 / scale, 0);
+      ctx.lineTo(-20 / scale, -8 / scale);
+      ctx.lineTo(-20 / scale, 8 / scale);
+      ctx.closePath();
+      ctx.fill();
+      
+      // 清除发光画眼睛
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(8 / scale, -3 / scale, 2 / scale, 0, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.restore();
+    }
+
     ctx.restore();
 
-  }, [points, tempPoints, pathData, containerSize, resolution, scale, offsetX, offsetY, selectedIndices, activeSelectTarget]);
+  }, [points, tempPoints, pathData, containerSize, resolution, scale, offsetX, offsetY, selectedIndices, activeSelectTarget, isPlaying]);
+
+  // 处理游动动画帧
+  const animatePlay = useCallback((time: number) => {
+    if (!lastTimeRef.current) lastTimeRef.current = time;
+    const deltaTime = (time - lastTimeRef.current) / 1000; // 转换为秒
+    lastTimeRef.current = time;
+
+    // 速度定义：playSpeed 表示每秒经过的点数。例如 playSpeed=1 表示1秒经过1个点（从 index 到 index+1）
+    const progressDelta = deltaTime * playSpeed;
+    
+    playProgressRef.current += progressDelta;
+
+    if (playProgressRef.current >= pathData.length - 1) {
+      // 游到了终点，循环播放
+      playProgressRef.current = 0;
+    }
+
+    draw(); // 强制触发重绘
+    animationFrameRef.current = requestAnimationFrame(animatePlay);
+  }, [draw, pathData.length, playSpeed]);
+
+  useEffect(() => {
+    if (isPlaying) {
+      lastTimeRef.current = performance.now();
+      animationFrameRef.current = requestAnimationFrame(animatePlay);
+    } else {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      playProgressRef.current = 0; // 停止时重置进度
+      draw(); // 恢复无鱼状态的重绘
+    }
+    return () => {
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    };
+  }, [isPlaying, animatePlay, draw]);
 
   useEffect(() => {
     draw();
@@ -348,17 +450,8 @@ export default function Home() {
     const pos = getMousePos(e);
     if (!pos) return;
 
-    if (mode === 'freehand') {
-      setIsDrawing(true);
-      setTempPoints([pos]);
-      setSelectedIndices([]); // 自由画线时清空选择
-      setActiveSelectTarget(null);
-    } else if (mode === 'keypoint') {
-      commitPoints(prev => [...prev, pos]);
-      setSelectedIndices([]);
-      setActiveSelectTarget(null);
-    } else if (mode === 'select' && activeSelectTarget) {
-      // 只有在明确激活了选点按钮 (A 或 B) 时，才响应画布上的点选
+    if (activeSelectTarget) {
+      // 在任何模式下，只要激活了选点按钮 (A 或 B) 时，才响应画布上的点选
       // 碰撞检测（点选坐标点）
       const HIT_RADIUS = 15 / scale;
       let hitIndex = -1;
@@ -389,6 +482,15 @@ export default function Home() {
           return newIndices;
         });
       }
+    } else if (mode === 'freehand') {
+      setIsDrawing(true);
+      setTempPoints([pos]);
+      setSelectedIndices([]); // 自由画线时清空选择
+      setActiveSelectTarget(null);
+    } else if (mode === 'keypoint') {
+      commitPoints(prev => [...prev, pos]);
+      setSelectedIndices([]);
+      setActiveSelectTarget(null);
     }
   };
 
@@ -580,7 +682,7 @@ export default function Home() {
 
           <div className="flex bg-slate-800 p-1 rounded-lg border border-slate-700">
             <button
-              onClick={() => { setMode('freehand'); setSelectedIndices([]); }}
+              onClick={() => { setMode('freehand'); setSelectedIndices([]); setActiveSelectTarget(null); }}
               className={`flex items-center gap-2 px-4 py-1.5 rounded-md transition-all ${
                 mode === 'freehand' ? 'bg-cyan-900/50 text-cyan-400 shadow-[0_0_10px_rgba(0,255,255,0.2)]' : 'text-slate-400 hover:text-slate-200'
               }`}
@@ -589,22 +691,13 @@ export default function Home() {
               <span className="text-sm font-medium">自由画线</span>
             </button>
             <button
-              onClick={() => { setMode('keypoint'); setSelectedIndices([]); }}
+              onClick={() => { setMode('keypoint'); setSelectedIndices([]); setActiveSelectTarget(null); }}
               className={`flex items-center gap-2 px-4 py-1.5 rounded-md transition-all ${
                 mode === 'keypoint' ? 'bg-cyan-900/50 text-cyan-400 shadow-[0_0_10px_rgba(0,255,255,0.2)]' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
               <MousePointer2 size={16} />
               <span className="text-sm font-medium">坐标点</span>
-            </button>
-            <button
-              onClick={() => { setMode('select'); setActiveSelectTarget(null); }}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-md transition-all ${
-                mode === 'select' ? 'bg-cyan-900/50 text-cyan-400 shadow-[0_0_10px_rgba(0,255,255,0.2)]' : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <MousePointerClick size={16} />
-              <span className="text-sm font-medium">选择/调整</span>
             </button>
           </div>
           
@@ -623,150 +716,209 @@ export default function Home() {
         {/* 左侧控制面板 */}
         <aside className="w-72 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-2xl h-full">
           <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent min-h-0 flex flex-col">
-            <div className="p-6 border-b border-slate-800 shrink-0">
-              <div className="flex items-center gap-2 mb-4 text-slate-200 font-semibold">
-                <Settings size={18} className="text-cyan-500" />
-                <h2>画布设置</h2>
-              </div>
+            <div className="border-b border-slate-800 shrink-0">
+              <button 
+                onClick={() => setIsResolutionSettingsOpen(!isResolutionSettingsOpen)}
+                className="w-full p-6 flex items-center justify-between text-slate-200 font-semibold hover:bg-slate-800/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Settings size={18} className="text-cyan-500" />
+                  <h2>画布设置</h2>
+                </div>
+                {isResolutionSettingsOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+              </button>
               
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs text-slate-500 mb-1">分辨率宽 (Width)</label>
-                  <input
-                    type="number"
-                    value={resolution.width}
-                    onChange={(e) => setResolution(p => ({ ...p, width: Number(e.target.value) }))}
-                    className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
-                  />
+              {isResolutionSettingsOpen && (
+                <div className="px-6 pb-6 space-y-4">
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">分辨率宽 (Width)</label>
+                    <input
+                      type="number"
+                      value={resolution.width}
+                      onChange={(e) => setResolution(p => ({ ...p, width: Number(e.target.value) }))}
+                      className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">分辨率高 (Height)</label>
+                    <input
+                      type="number"
+                      value={resolution.height}
+                      onChange={(e) => setResolution(p => ({ ...p, height: Number(e.target.value) }))}
+                      className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs text-slate-500 mb-1">分辨率高 (Height)</label>
-                  <input
-                    type="number"
-                    value={resolution.height}
-                    onChange={(e) => setResolution(p => ({ ...p, height: Number(e.target.value) }))}
-                    className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
-                  />
-                </div>
-              </div>
+              )}
             </div>
 
-            <div className="p-6 border-b border-slate-800 shrink-0">
-              <h2 className="text-slate-200 font-semibold mb-4 text-sm">绘制与调整</h2>
-              <div className="space-y-5">
-                <div>
-                  <label className="flex justify-between text-xs text-slate-500 mb-2">
-                    <span>平滑强度 (Epsilon)</span>
-                    <span className="text-cyan-400">{smoothEpsilon}</span>
-                  </label>
-                  <input
-                    type="range"
-                    min="1"
-                    max="100"
-                    value={smoothEpsilon}
-                    onChange={(e) => setSmoothEpsilon(Number(e.target.value))}
-                    className="w-full accent-cyan-500"
-                  />
-                  <p className="text-[10px] text-slate-600 mt-2">
-                    * 自由画线模式生效。值越大，生成的坐标点越少。
-                  </p>
+            <div className="border-b border-slate-800 shrink-0">
+              <button 
+                onClick={() => setIsDrawSettingsOpen(!isDrawSettingsOpen)}
+                className="w-full p-6 flex items-center justify-between text-slate-200 font-semibold hover:bg-slate-800/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <PenTool size={18} className="text-emerald-500" />
+                  <h2>绘制与调整</h2>
                 </div>
+                {isDrawSettingsOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+              </button>
+              
+              {isDrawSettingsOpen && (
+                <div className="px-6 pb-6 space-y-5">
+                  <div>
+                    <label className="flex justify-between text-xs text-slate-500 mb-2">
+                      <span>平滑强度 (Epsilon)</span>
+                      <span className="text-cyan-400">{smoothEpsilon}</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="1"
+                      max="100"
+                      value={smoothEpsilon}
+                      onChange={(e) => setSmoothEpsilon(Number(e.target.value))}
+                      className="w-full accent-cyan-500"
+                    />
+                    <p className="text-[10px] text-slate-600 mt-2">
+                      * 自由画线模式生效。值越大，生成的坐标点越少。
+                    </p>
+                  </div>
 
-                <div className="pt-4 border-t border-slate-800">
-                  <label className="flex justify-between text-xs text-slate-500 mb-2">
-                    <span>全局增加坐标点数</span>
-                    <span className="text-emerald-400">+{addPointsCount}</span>
-                  </label>
-                  <div className="flex gap-2 items-center">
-                  <input
-                    type="range"
-                    min="1"
-                    max="200"
-                    value={addPointsCount}
-                    onChange={(e) => setAddPointsCount(Number(e.target.value))}
-                    className="flex-1 accent-emerald-500"
-                  />
-                </div>
-                  <button
-                    onClick={() => commitPoints(prev => resamplePath(prev, addPointsCount))}
-                    disabled={points.length < 2}
-                    className="w-full mt-3 py-2 px-4 bg-slate-800 hover:bg-emerald-900/30 text-slate-300 hover:text-emerald-400 border border-slate-700 hover:border-emerald-500/50 rounded-lg transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    全局均匀增加
-                  </button>
-                </div>
-
-                <div className="pt-4 border-t border-slate-800">
-                  <h3 className="text-xs text-slate-400 mb-2">镜像与方向</h3>
-                  <div className="flex gap-2 text-xs mb-2">
+                  <div className="pt-4 border-t border-slate-800">
+                    <label className="flex justify-between text-xs text-slate-500 mb-2">
+                      <span>全局增加坐标点数</span>
+                      <span className="text-emerald-400">+{addPointsCount}</span>
+                    </label>
+                    <div className="flex gap-2 items-center">
+                    <input
+                      type="range"
+                      min="1"
+                      max="200"
+                      value={addPointsCount}
+                      onChange={(e) => setAddPointsCount(Number(e.target.value))}
+                      className="flex-1 accent-emerald-500"
+                    />
+                  </div>
                     <button
-                      onClick={handleMirrorHorizontal}
-                      disabled={points.length === 0}
-                      className="flex-1 flex items-center justify-center gap-1 py-2 px-2 bg-slate-800 hover:bg-cyan-900/30 text-slate-300 hover:text-cyan-400 border border-slate-700 hover:border-cyan-500/50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="水平镜像"
+                      onClick={() => commitPoints(prev => resamplePath(prev, addPointsCount))}
+                      disabled={points.length < 2}
+                      className="w-full mt-3 py-2 px-4 bg-slate-800 hover:bg-emerald-900/30 text-slate-300 hover:text-emerald-400 border border-slate-700 hover:border-emerald-500/50 rounded-lg transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      <FlipHorizontal size={14} />
-                      <span>左右</span>
-                    </button>
-                    <button
-                      onClick={handleMirrorVertical}
-                      disabled={points.length === 0}
-                      className="flex-1 flex items-center justify-center gap-1 py-2 px-2 bg-slate-800 hover:bg-cyan-900/30 text-slate-300 hover:text-cyan-400 border border-slate-700 hover:border-cyan-500/50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="垂直镜像"
-                    >
-                      <FlipVertical size={14} />
-                      <span>上下</span>
+                      全局均匀增加
                     </button>
                   </div>
-                  <button
-                    onClick={handleReverseDirection}
-                    disabled={points.length === 0}
-                    className="w-full flex items-center justify-center gap-2 py-2 px-2 bg-slate-800 hover:bg-cyan-900/30 text-slate-300 hover:text-cyan-400 border border-slate-700 hover:border-cyan-500/50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-xs"
-                    title="反转路径首尾方向"
-                  >
-                    <Repeat size={14} />
-                    <span>反转路径方向</span>
-                  </button>
-                </div>
 
-                {mode === 'select' && (
-                  <div className="pt-4 border-t border-slate-800 mt-4">
-                    <h3 className="text-xs text-slate-400 mb-2">局部段落调整</h3>
-                  <p className="text-[10px] text-slate-500 mb-3 leading-relaxed">
-                    1. 点击下方按钮激活选点状态<br/>
-                    2. 在右侧画布点击坐标点
-                  </p>
-                  <div className="flex gap-2 mb-3 text-xs text-slate-300">
-                    <button 
-                      onClick={() => setActiveSelectTarget('A')}
-                      className={`flex-1 border rounded p-2 text-center transition-all ${
-                        activeSelectTarget === 'A' 
-                          ? 'bg-fuchsia-900/40 border-fuchsia-500 text-fuchsia-400 shadow-[0_0_10px_rgba(217,70,239,0.3)]' 
-                          : 'bg-slate-950 border-slate-700 hover:border-slate-500'
-                      }`}
+                  <div className="pt-4 border-t border-slate-800">
+                    <h3 className="text-xs text-slate-400 mb-2">镜像与方向</h3>
+                    <div className="flex gap-2 text-xs mb-2">
+                      <button
+                        onClick={handleMirrorHorizontal}
+                        disabled={points.length === 0}
+                        className="flex-1 flex items-center justify-center gap-1 py-2 px-2 bg-slate-800 hover:bg-cyan-900/30 text-slate-300 hover:text-cyan-400 border border-slate-700 hover:border-cyan-500/50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="水平镜像"
+                      >
+                        <FlipHorizontal size={14} />
+                        <span>左右</span>
+                      </button>
+                      <button
+                        onClick={handleMirrorVertical}
+                        disabled={points.length === 0}
+                        className="flex-1 flex items-center justify-center gap-1 py-2 px-2 bg-slate-800 hover:bg-cyan-900/30 text-slate-300 hover:text-cyan-400 border border-slate-700 hover:border-cyan-500/50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="垂直镜像"
+                      >
+                        <FlipVertical size={14} />
+                        <span>上下</span>
+                      </button>
+                    </div>
+                    <button
+                      onClick={handleReverseDirection}
+                      disabled={points.length === 0}
+                      className="w-full flex items-center justify-center gap-2 py-2 px-2 bg-slate-800 hover:bg-cyan-900/30 text-slate-300 hover:text-cyan-400 border border-slate-700 hover:border-cyan-500/50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-xs"
+                      title="反转路径首尾方向"
                     >
-                      选点 A: {selectedIndices[0] !== undefined ? selectedIndices[0] : '-'}
-                    </button>
-                    <button 
-                      onClick={() => setActiveSelectTarget('B')}
-                      className={`flex-1 border rounded p-2 text-center transition-all ${
-                        activeSelectTarget === 'B' 
-                          ? 'bg-fuchsia-900/40 border-fuchsia-500 text-fuchsia-400 shadow-[0_0_10px_rgba(217,70,239,0.3)]' 
-                          : 'bg-slate-950 border-slate-700 hover:border-slate-500'
-                      }`}
-                    >
-                      选点 B: {selectedIndices[1] !== undefined ? selectedIndices[1] : '-'}
+                      <Repeat size={14} />
+                      <span>反转路径方向</span>
                     </button>
                   </div>
-                    
+
+                  <div className="pt-4 border-t border-slate-800">
+                    <h3 className="text-xs text-slate-400 mb-2">模拟游动</h3>
+                    <label className="flex justify-between text-xs text-slate-500 mb-2">
+                      <span>游动速度</span>
+                      <span className="text-amber-400">{playSpeed}</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="1"
+                      max="100"
+                      step="1"
+                      value={playSpeed}
+                      onChange={(e) => setPlaySpeed(Number(e.target.value))}
+                      className="w-full accent-amber-500 mb-3"
+                    />
+                    <p className="text-[10px] text-slate-600 mb-3 leading-relaxed">
+                      * 速度为 1 表示游过相邻两点耗时 1 秒。值为 10 表示耗时 1/10 秒。
+                    </p>
+                    <button
+                      onClick={() => setIsPlaying(!isPlaying)}
+                      disabled={pathData.length < 2}
+                      className={`w-full flex items-center justify-center gap-2 py-2 px-4 border rounded-lg transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed ${
+                        isPlaying 
+                          ? 'bg-rose-900/40 text-rose-400 border-rose-500/50 hover:bg-rose-900/60' 
+                          : 'bg-amber-900/40 text-amber-400 border-amber-500/50 hover:bg-amber-900/60'
+                      }`}
+                    >
+                      {isPlaying ? (
+                        <>
+                          <Square size={14} />
+                          <span>停止模拟</span>
+                        </>
+                      ) : (
+                        <>
+                          <Play size={14} />
+                          <span>开始模拟</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="pt-4 border-t border-slate-800">
+                    <h3 className="text-xs text-slate-400 mb-2">局部区域调整</h3>
+                    <p className="text-[10px] text-slate-500 mb-3 leading-relaxed">
+                      1. 点击下方按钮激活选点状态<br/>
+                      2. 在右侧画布点击坐标点
+                    </p>
+                    <div className="flex gap-2 mb-3 text-xs text-slate-300">
+                      <button 
+                        onClick={() => setActiveSelectTarget('A')}
+                        className={`flex-1 border rounded p-2 text-center transition-all ${
+                          activeSelectTarget === 'A' 
+                            ? 'bg-fuchsia-900/40 border-fuchsia-500 text-fuchsia-400 shadow-[0_0_10px_rgba(217,70,239,0.3)]' 
+                            : 'bg-slate-950 border-slate-700 hover:border-slate-500'
+                        }`}
+                      >
+                        选点 A: {selectedIndices[0] !== undefined ? selectedIndices[0] : '-'}
+                      </button>
+                      <button 
+                        onClick={() => setActiveSelectTarget('B')}
+                        className={`flex-1 border rounded p-2 text-center transition-all ${
+                          activeSelectTarget === 'B' 
+                            ? 'bg-fuchsia-900/40 border-fuchsia-500 text-fuchsia-400 shadow-[0_0_10px_rgba(217,70,239,0.3)]' 
+                            : 'bg-slate-950 border-slate-700 hover:border-slate-500'
+                        }`}
+                      >
+                        选点 B: {selectedIndices[1] !== undefined ? selectedIndices[1] : '-'}
+                      </button>
+                    </div>
+                      
                     {selectedIndices.length === 2 && (
                       <p className="text-[10px] text-emerald-500 mb-2">
-                        当前段落包含 {Math.abs(selectedIndices[0] - selectedIndices[1]) + 1} 个点
+                        当前区域包含 {Math.abs(selectedIndices[0] - selectedIndices[1]) + 1} 个点
                       </p>
                     )}
                     
                     <label className="flex justify-between text-xs text-slate-500 mb-2">
-                      <span>段落坐标点总数</span>
+                      <span>区域坐标点总数</span>
                       <span className="text-emerald-400">{segmentTargetCount}</span>
                     </label>
                     <input
@@ -786,70 +938,76 @@ export default function Home() {
                       应用局部调整
                     </button>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
             </div>
 
-            <div className="p-6 flex flex-col shrink-0" style={{ height: '350px' }}>
-              <div className="flex items-center justify-between mb-3 shrink-0">
-                <h2 className="text-slate-200 font-semibold text-sm">导出路径数据</h2>
-                <div className="flex gap-1.5">
-                  <button
-                    onClick={handleCopyData}
-                    disabled={pathData.length === 0}
-                    className="p-1.5 bg-slate-800 hover:bg-cyan-900/40 text-slate-400 hover:text-cyan-400 rounded border border-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="复制数据"
-                  >
-                    {isCopied ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
-                  </button>
-                  <button
-                    onClick={() => handleDownloadData(false)}
-                    disabled={pathData.length === 0}
-                    className="p-1.5 bg-slate-800 hover:bg-emerald-900/40 text-slate-400 hover:text-emerald-400 rounded border border-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="仅下载 .dat 文件"
-                  >
-                    <FileDown size={14} />
-                  </button>
-                  <button
-                    onClick={() => handleDownloadData(true)}
-                    disabled={pathData.length === 0}
-                    className="p-1.5 bg-slate-800 hover:bg-fuchsia-900/40 text-slate-400 hover:text-fuchsia-400 rounded border border-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="下载 .dat 与 .png 文件"
-                  >
-                    <ImageDown size={14} />
-                  </button>
+            <div className="border-b border-slate-800 shrink-0">
+              <button 
+                onClick={() => setIsExportSettingsOpen(!isExportSettingsOpen)}
+                className="w-full p-6 flex items-center justify-between text-slate-200 font-semibold hover:bg-slate-800/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Download size={18} className="text-amber-500" />
+                  <h2>导出路径数据</h2>
                 </div>
-              </div>
+                {isExportSettingsOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+              </button>
               
-              <div className="mb-3 flex items-center gap-2 shrink-0">
-                <span className="text-xs text-slate-500 whitespace-nowrap">文件名</span>
-                <input
-                  type="text"
-                  value={exportFilename}
-                  onChange={(e) => setExportFilename(e.target.value)}
-                  placeholder="path00001"
-                  className="flex-1 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 transition-all"
-                />
-                <span className="text-xs text-slate-600">.dat</span>
-              </div>
-              
-              <div className="flex-1 min-h-0 bg-slate-950 rounded-lg border border-slate-800 p-3 overflow-y-auto font-mono text-xs text-cyan-200/80 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
-                {pathData.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-slate-600 text-center">
-                    暂无数据<br/>请在右侧画布绘制
+              {isExportSettingsOpen && (
+                <div className="px-6 pb-6">
+                  <div className="flex items-center justify-between mb-3 shrink-0">
+                    <div className="flex gap-1.5 w-full justify-end">
+                      <button
+                        onClick={handleCopyData}
+                        disabled={pathData.length === 0}
+                        className="p-1.5 bg-slate-800 hover:bg-cyan-900/40 text-slate-400 hover:text-cyan-400 rounded border border-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="复制数据"
+                      >
+                        {isCopied ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
+                      </button>
+                      <button
+                        onClick={() => handleDownloadData(false)}
+                        disabled={pathData.length === 0}
+                        className="p-1.5 bg-slate-800 hover:bg-emerald-900/40 text-slate-400 hover:text-emerald-400 rounded border border-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="仅下载 .dat 文件"
+                      >
+                        <FileDown size={14} />
+                      </button>
+                      <button
+                        onClick={() => handleDownloadData(true)}
+                        disabled={pathData.length === 0}
+                        className="p-1.5 bg-slate-800 hover:bg-fuchsia-900/40 text-slate-400 hover:text-fuchsia-400 rounded border border-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="下载 .dat 与 .png 文件"
+                      >
+                        <ImageDown size={14} />
+                      </button>
+                    </div>
                   </div>
-                ) : (
-                  <pre className="m-0 break-all whitespace-pre-wrap">
-                    {JSON.stringify(
-                      pathData.map(p => [
-                        Number(p.x.toFixed(2)),
-                        Number(p.y.toFixed(2)),
-                        Number(p.angle.toFixed(2))
-                      ])
+
+                  <div className="flex items-center gap-2 mb-3 shrink-0">
+                    <label className="text-xs text-slate-500 whitespace-nowrap">文件名</label>
+                    <input
+                      type="text"
+                      value={exportFilename}
+                      onChange={(e) => setExportFilename(e.target.value)}
+                      placeholder="path00001"
+                      className="flex-1 bg-slate-950 border border-slate-700 rounded p-1.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500"
+                    />
+                    <span className="text-xs text-slate-500">.dat</span>
+                  </div>
+
+                  <div className="bg-slate-950 rounded border border-slate-800 p-3 overflow-y-auto flex-1 min-h-[150px] max-h-[300px] scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+                    {pathData.length === 0 ? (
+                      <p className="text-slate-500 text-sm text-center mt-10">暂无数据</p>
+                    ) : (
+                      <pre className="text-[10px] text-cyan-300 font-mono break-all whitespace-pre-wrap">
+                        {JSON.stringify(pathData.map(p => [Number(p.x.toFixed(2)), Number(p.y.toFixed(2)), Number(p.angle.toFixed(2))]))}
+                      </pre>
                     )}
-                  </pre>
-                )}
-              </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </aside>

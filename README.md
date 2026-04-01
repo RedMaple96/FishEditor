@@ -1,57 +1,91 @@
-# React + TypeScript + Vite
+# Fish Path Editor (鱼游路径编辑器)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+这是一个基于 Web 技术开发的 2D 路径编辑器，专为规划和生成平滑的物理路径（如鱼的游动轨迹）而设计。
+用户可以通过自由手绘或点击布置坐标点的方式创建路径，程序会自动将路径平滑化（基于 Bezier 曲线），并生成每一个节点的位置 (X, Y) 以及它的旋转角度 (Angle)。
 
-Currently, two official plugins are available:
+## ✨ 核心特性
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **多模式绘制**：支持“自由画线”与“放置坐标点”两种模式。自由画线后会自动通过 Ramer-Douglas-Peucker 算法抽稀并生成平滑的关键点。
+- **完美的物理平滑**：内置全局的 Bezier Spline 平滑算法，生成极其自然流畅的 C1 连续物理曲线，杜绝生硬的折角。
+- **自定义坐标系与分辨率**：可自由调整分辨率（默认 1280x720），并采用**左下角**为坐标原点 `(0, 0)` 的数学系坐标标准（X轴向右为正，Y轴向上为正）。
+- **无极缩放与平移**：支持通过鼠标滚轮进行无极缩放（0.1x 到 10x），支持鼠标右键或中键拖拽平移画布，方便编辑超长路径或进行微调。
+- **动态坐标点重采样**：
+  - **全局增加**：可以基于当前的平滑曲线形态，全局均匀地插入指定数量的坐标点，且不改变原有的物理轨迹弧度。
+  - **局部区域调整**：支持在画布上选中任意两点（A点和B点），在它们之间增加或减少坐标点。
+- **路径镜像与方向控制**：支持一键将路径进行水平镜像、垂直镜像，或完全反转鱼的游动方向（头尾对调）。
+- **模拟游动**：支持在绘制的路径上生成发光的小鱼进行游动模拟测试，并可实时调节游动速度（支持 1~100 级速度调节）。
+- **完善的撤销重做系统**：每一次有效编辑都会记录在历史栈中，支持快捷键 `Cmd/Ctrl + Z`（撤销）和 `Cmd/Ctrl + Y`（重做）。
+- **双模数据导出**：
+  - 导出标准的 `.dat` 文件，数据格式为精简的嵌套数组 `[[x, y, angle], ...]`。
+  - 支持同步导出带有透明背景的 `.png` 画布截图留底。
+  - 支持直接复制数据到剪贴板。
 
-## Expanding the ESLint configuration
+## 🚀 快速开始
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### 前置要求
+- [Node.js](https://nodejs.org/) (建议 v16+)
+- npm 或 pnpm
 
-```js
-export default tseslint.config({
-  extends: [
-    // Remove ...tseslint.configs.recommended and replace with this
-    ...tseslint.configs.recommendedTypeChecked,
-    // Alternatively, use this for stricter rules
-    ...tseslint.configs.strictTypeChecked,
-    // Optionally, add this for stylistic rules
-    ...tseslint.configs.stylisticTypeChecked,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+### 安装与运行
+
+```bash
+# 1. 克隆项目或进入项目目录
+cd FishEditor
+
+# 2. 安装依赖
+npm install
+
+# 3. 启动开发服务器 (本地)
+npm run dev
+
+# (可选) 使用预设的 Shell 脚本以后台进程方式启动公网 HTTPS 服务
+chmod +x start.sh stop.sh
+./start.sh
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+> **注意**：本项目已配置 Vite 使用 `@vitejs/plugin-basic-ssl` 插件，默认开启 HTTPS 并绑定 `0.0.0.0` 暴露到局域网/公网，默认端口为 `5178`。
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## 🛠️ 技术栈
 
-export default tseslint.config({
-  extends: [
-    // other configs...
-    // Enable lint rules for React
-    reactX.configs['recommended-typescript'],
-    // Enable lint rules for React DOM
-    reactDom.configs.recommended,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+- **框架**: [React 18](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/)
+- **构建工具**: [Vite](https://vitejs.dev/)
+- **样式**: [Tailwind CSS](https://tailwindcss.com/)
+- **图标**: [Lucide React](https://lucide.dev/)
+- **渲染**: HTML5 Canvas 2D API
+- **核心算法**:
+  - Ramer-Douglas-Peucker 算法 (手绘轨迹抽稀)
+  - 贝塞尔样条曲线算法 (Bezier Spline Interpolation)
+  - 弧长参数化算法 (Arc-Length Parameterization)
+
+## 📖 使用指南
+
+1. **调整分辨率**：点击左侧面板的 **画布设置** 展开面板，设置您的目标屏幕分辨率，画布中央的红框即为分辨率边界（原点在左下角）。
+2. **绘制路径**：
+   - 选中顶部导航栏的 **自由画线**，在画布上按住鼠标左键拖动，松开后自动生成点。
+   - 选中顶部导航栏的 **坐标点**，在画布上依次点击，生成精确折点，程序会自动计算出平滑过渡。
+3. **调整视图**：滚动鼠标滚轮可缩放画布，按住鼠标右键可拖动平移视图。
+4. **调整路径密度**：
+   - 展开左侧面板的 **绘制与调整**。
+   - 使用“全局增加坐标点数”拖动滑块，然后点击“全局均匀增加”。
+5. **局部区域调整**：
+   - 在左侧 **绘制与调整** 面板底部找到“局部区域调整”。
+   - 点击面板上的“选点 A”按钮，然后在画布上点击想要作为起始的点；接着点击“选点 B”按钮并选择终点。
+   - 拖动下方滑块设置两点之间想要保留的总点数，点击“应用局部调整”。
+6. **模拟测试**：在 **绘制与调整** 面板的“模拟游动”区域，点击“开始模拟”查看鱼的游动效果，拖动滑块可实时改变速度。
+7. **导出数据**：展开左侧面板的 **导出路径数据**，输入文件名，点击相应的导出按钮下载 `.dat`（仅数据）或 `.png`（带截图）。
+
+## 📄 导出的数据格式
+
+导出的 `.dat` 文件实质上是一个 JSON 格式的嵌套数组。每一项代表一个点，保留两位小数。
+
+格式：`[ [X坐标, Y坐标, 旋转角度], ... ]`
+
+示例：
+```json
+[
+  [-235.94, 480.50, 20.89],
+  [494.64, 201.70, 42.32],
+  [514.99, -203.28, 87.12]
+]
 ```
+> **角度说明**：由于坐标系为左下角原点，这里的角度代表了该点切线的绝对方向角度（顺时针为正，范围在 0 ~ 360 度之间），可直接应用于物理引擎中的物体旋转（如鱼头朝向）。

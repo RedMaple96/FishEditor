@@ -11,7 +11,7 @@ if [ -f ".pid" ]; then
     PID=$(cat .pid)
     if ps -p $PID > /dev/null; then
         echo "Server is already running (PID: $PID)"
-        echo "Please run ./stop.sh first or access https://localhost:5178"
+        echo "Please run ./stop.sh first or access http://localhost:5178"
         exit 1
     else
         # PID 文件存在但进程已死，清理残留
@@ -32,8 +32,8 @@ echo "PID: $PID"
 echo "You can check the logs using: tail -f server.log"
 echo "---------------------------------------------------"
 echo "Access the editor at:"
-echo "👉 https://localhost:5178/"
-echo "👉 https://127.0.0.1:5178/"
+echo "👉 http://localhost:5178/"
+echo "👉 http://127.0.0.1:5178/"
 echo "(Note: Check server.log for the exact port if 5178 is occupied)"
 echo "---------------------------------------------------"
 echo "To stop the server, run: ./stop.sh"

@@ -1,9 +1,18 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { MousePointer2, MousePointerClick, PenTool, Trash2, Download, Settings, Copy, Check, Fish, Undo, Redo, FlipHorizontal, FlipVertical, Repeat, FileDown, ImageDown, Play, Square, ChevronDown, ChevronRight } from 'lucide-react';
+import { MousePointer2, MousePointerClick, PenTool, Trash2, Download, Settings, Copy, Check, Fish, Undo, Redo, FlipHorizontal, FlipVertical, Repeat, FileDown, ImageDown, Play, Square, ChevronDown, ChevronRight, Upload } from 'lucide-react';
 import { Point, PathPoint, douglasPeucker, calculateAngles, bezierSpline, resamplePath, resampleSegment } from '../utils/path';
 
 // 定义绘制模式
 type DrawMode = 'freehand' | 'keypoint';
+
+interface ImportedPath {
+  id: string;
+  name: string;
+  data: PathPoint[];
+  speed: number;
+  isPlaying: boolean;
+  color: string;
+}
 
 export default function Home() {
   // 画布尺寸设置
@@ -11,6 +20,7 @@ export default function Home() {
   const [isResolutionSettingsOpen, setIsResolutionSettingsOpen] = useState(false);
   const [isDrawSettingsOpen, setIsDrawSettingsOpen] = useState(true);
   const [isExportSettingsOpen, setIsExportSettingsOpen] = useState(true);
+  const [isImportSettingsOpen, setIsImportSettingsOpen] = useState(false);
   
   // 核心状态
   const [mode, setMode] = useState<DrawMode>('freehand');
@@ -33,9 +43,15 @@ export default function Home() {
     setHistoryState(prevHistory => {
       const currentPoints = prevHistory.history[prevHistory.currentIndex];
       const newPoints = typeof newPointsOrUpdater === 'function' ? newPointsOrUpdater(currentPoints) : newPointsOrUpdater;
-      
+
       // 只有点确实改变了才保存历史
       if (JSON.stringify(currentPoints) !== JSON.stringify(newPoints)) {
+        // 如果点的数量变为 0，或者路径发生了根本改变，为了安全，重置游动进度
+        if (newPoints.length === 0) {
+           setIsPlaying(false);
+           playProgressRef.current = 0;
+        }
+
         // 截断 currentIndex 之后的历史 (如果我们在撤回后又做了新操作)
         const newHistory = prevHistory.history.slice(0, prevHistory.currentIndex + 1);
         newHistory.push(newPoints);
@@ -49,6 +65,8 @@ export default function Home() {
   const handleUndo = useCallback(() => {
     setHistoryState(prev => {
       if (prev.currentIndex > 0) {
+        setIsPlaying(false);
+        playProgressRef.current = 0;
         return { ...prev, currentIndex: prev.currentIndex - 1 };
       }
       return prev;
@@ -60,6 +78,8 @@ export default function Home() {
   const handleRedo = useCallback(() => {
     setHistoryState(prev => {
       if (prev.currentIndex < prev.history.length - 1) {
+        setIsPlaying(false);
+        playProgressRef.current = 0;
         return { ...prev, currentIndex: prev.currentIndex + 1 };
       }
       return prev;
@@ -97,18 +117,25 @@ export default function Home() {
     if (points.length === 0) return;
     const newPoints = points.map(p => ({ ...p, x: resolution.width - p.x }));
     commitPoints(newPoints);
+    setIsPlaying(false);
+    playProgressRef.current = 0;
   };
 
   const handleMirrorVertical = () => {
     if (points.length === 0) return;
     const newPoints = points.map(p => ({ ...p, y: resolution.height - p.y }));
     commitPoints(newPoints);
+    setIsPlaying(false);
+    playProgressRef.current = 0;
   };
 
   const handleReverseDirection = () => {
     if (points.length === 0) return;
     const newPoints = [...points].reverse();
     commitPoints(newPoints);
+    // 只要修改了路径，停止主路径的模拟游动并重置进度
+    setIsPlaying(false);
+    playProgressRef.current = 0;
   };
 
   // 局部调整状态
@@ -127,6 +154,76 @@ export default function Home() {
   const playProgressRef = useRef(0); // 当前播放进度（在 0 到 pathData.length - 1 之间）
   const lastTimeRef = useRef<number>(0);
   const animationFrameRef = useRef<number>();
+
+  // 导入与多路径模拟状态
+  const [importedPaths, setImportedPaths] = useState<ImportedPath[]>([]);
+  const importedProgressesRef = useRef<Record<string, number>>({});
+  
+  // 处理上传的 .dat 文件
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    const newPaths: ImportedPath[] = [];
+    const colors = ['#38bdf8', '#a3e635', '#f472b6', '#fbbf24', '#a78bfa', '#fb923c'];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        const text = await file.text();
+        const json = JSON.parse(text);
+        if (Array.isArray(json)) {
+          const data: PathPoint[] = json.map((item: number[]) => ({
+            x: item[0],
+            y: item[1],
+            angle: item[2]
+          }));
+          const id = Math.random().toString(36).substring(2, 9);
+          newPaths.push({
+            id,
+            name: file.name,
+            data,
+            speed: 10,
+            isPlaying: false,
+            color: colors[Math.floor(Math.random() * colors.length)]
+          });
+          importedProgressesRef.current[id] = 0;
+        }
+      } catch (err) {
+        console.error('解析文件失败:', file.name, err);
+      }
+    }
+
+    setImportedPaths(prev => [...prev, ...newPaths]);
+    e.target.value = ''; // reset input
+  };
+
+  const removeImportedPath = (id: string) => {
+    setImportedPaths(prev => prev.filter(p => p.id !== id));
+    delete importedProgressesRef.current[id];
+  };
+
+  const clearAllImportedPaths = () => {
+    setImportedPaths([]);
+    importedProgressesRef.current = {};
+  };
+
+  const updateImportedPath = (id: string, updates: Partial<ImportedPath>) => {
+    setImportedPaths(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
+  };
+
+  const playAllImportedPaths = () => {
+    setImportedPaths(prev => prev.map(p => ({ ...p, isPlaying: true })));
+  };
+
+  const stopAllImportedPaths = () => {
+    setImportedPaths(prev => prev.map(p => ({ ...p, isPlaying: false })));
+    // 手动重置所有导入路径的进度
+    Object.keys(importedProgressesRef.current).forEach(id => {
+      importedProgressesRef.current[id] = 0;
+    });
+    draw(); // 强制重绘让鱼回到起点
+  };
 
   // 画布和容器引用
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -319,55 +416,136 @@ export default function Home() {
       const p1 = pathData[index];
       const p2 = pathData[nextIndex];
 
-      // 线性插值计算当前位置和角度
-      const currentX = p1.x + (p2.x - p1.x) * t;
-      const currentY = p1.y + (p2.y - p1.y) * t;
-      
-      // 处理角度的插值（考虑到 360 度循环的情况）
-      let a1 = p1.angle;
-      let a2 = p2.angle;
-      let diff = a2 - a1;
-      while (diff < -180) diff += 360;
-      while (diff > 180) diff -= 360;
-      const currentAngle = a1 + diff * t;
+      // 增加安全校验，防止因渲染帧过快导致的越界问题
+      if (p1 && p2 && typeof p1.x === 'number' && typeof p2.x === 'number') {
+        // 线性插值计算当前位置和角度
+        const currentX = p1.x + (p2.x - p1.x) * t;
+        const currentY = p1.y + (p2.y - p1.y) * t;
+        
+        // 处理角度的插值（考虑到 360 度循环的情况）
+        let a1 = p1.angle;
+        let a2 = p2.angle;
+        let diff = a2 - a1;
+        while (diff < -180) diff += 360;
+        while (diff > 180) diff -= 360;
+        const currentAngle = a1 + diff * t;
 
-      // 绘制鱼本体
-      ctx.save();
-      ctx.translate(currentX, currentY);
-      // Canvas 翻转系下，角度取反
-      ctx.rotate(-currentAngle * (Math.PI / 180));
-      
-      // 发光外圈
-      ctx.beginPath();
-      ctx.shadowColor = '#fbbf24';
-      ctx.shadowBlur = 15 / scale;
-      ctx.fillStyle = '#fbbf24';
-      
-      // 画一个简单的鱼的形状（水滴状/椭圆）
-      ctx.ellipse(0, 0, 15 / scale, 8 / scale, 0, 0, Math.PI * 2);
-      ctx.fill();
-      
-      // 画鱼尾巴
-      ctx.beginPath();
-      ctx.moveTo(-10 / scale, 0);
-      ctx.lineTo(-20 / scale, -8 / scale);
-      ctx.lineTo(-20 / scale, 8 / scale);
-      ctx.closePath();
-      ctx.fill();
-      
-      // 清除发光画眼睛
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = '#000';
-      ctx.beginPath();
-      ctx.arc(8 / scale, -3 / scale, 2 / scale, 0, Math.PI * 2);
-      ctx.fill();
-      
-      ctx.restore();
+        // 绘制鱼本体
+        ctx.save();
+        ctx.translate(currentX, currentY);
+        // Canvas 翻转系下，角度取反
+        ctx.rotate(-currentAngle * (Math.PI / 180));
+        
+        // 发光外圈
+        ctx.beginPath();
+        ctx.shadowColor = '#fbbf24';
+        ctx.shadowBlur = 15 / scale;
+        ctx.fillStyle = '#fbbf24';
+        
+        // 画一个简单的鱼的形状（水滴状/椭圆）
+        ctx.ellipse(0, 0, 15 / scale, 8 / scale, 0, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // 画鱼尾巴
+        ctx.beginPath();
+        ctx.moveTo(-10 / scale, 0);
+        ctx.lineTo(-20 / scale, -8 / scale);
+        ctx.lineTo(-20 / scale, 8 / scale);
+        ctx.closePath();
+        ctx.fill();
+        
+        // 清除发光画眼睛
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.arc(8 / scale, -3 / scale, 2 / scale, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.restore();
+      }
     }
+
+    // 绘制导入的多条路径和模拟鱼
+    importedPaths.forEach(ip => {
+      if (ip.data.length < 2) return;
+
+      // 绘制路径线条
+      ctx.beginPath();
+      ctx.shadowColor = ip.color;
+      ctx.shadowBlur = 5 / scale;
+      ctx.strokeStyle = ip.color;
+      ctx.lineWidth = 2 / scale;
+      ctx.globalAlpha = 0.5; // 让导入的路径半透明
+      
+      ctx.moveTo(ip.data[0].x, ip.data[0].y);
+      for (let i = 1; i < ip.data.length; i++) {
+        ctx.lineTo(ip.data[i].x, ip.data[i].y);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1.0;
+      ctx.shadowBlur = 0;
+
+      // 绘制导入路径上的模拟鱼
+      if (ip.isPlaying && ip.data && ip.data.length > 1) {
+        const progress = importedProgressesRef.current[ip.id] || 0;
+        const index = Math.floor(progress);
+        const nextIndex = Math.min(index + 1, ip.data.length - 1);
+        const t = progress - index;
+
+        const p1 = ip.data[index];
+        const p2 = ip.data[nextIndex];
+
+        // 增加安全校验，防止异常数据导致 p1 或 p2 为 undefined 报错
+        if (p1 && p2 && typeof p1.x === 'number' && typeof p2.x === 'number') {
+          const currentX = p1.x + (p2.x - p1.x) * t;
+          const currentY = p1.y + (p2.y - p1.y) * t;
+          
+          let a1 = p1.angle;
+          let a2 = p2.angle;
+          let diff = a2 - a1;
+          while (diff < -180) diff += 360;
+          while (diff > 180) diff -= 360;
+          const currentAngle = a1 + diff * t;
+
+          ctx.save();
+          ctx.translate(currentX, currentY);
+          ctx.rotate(-currentAngle * (Math.PI / 180));
+          
+          ctx.beginPath();
+          ctx.shadowColor = ip.color;
+          ctx.shadowBlur = 15 / scale;
+          ctx.fillStyle = ip.color;
+          
+          ctx.ellipse(0, 0, 15 / scale, 8 / scale, 0, 0, Math.PI * 2);
+          ctx.fill();
+          
+          ctx.beginPath();
+          ctx.moveTo(-10 / scale, 0);
+          ctx.lineTo(-20 / scale, -8 / scale);
+          ctx.lineTo(-20 / scale, 8 / scale);
+          ctx.closePath();
+          ctx.fill();
+          
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = '#000';
+          ctx.beginPath();
+          ctx.arc(8 / scale, -3 / scale, 2 / scale, 0, Math.PI * 2);
+          ctx.fill();
+          
+          ctx.restore();
+        }
+      }
+    });
 
     ctx.restore();
 
-  }, [points, tempPoints, pathData, containerSize, resolution, scale, offsetX, offsetY, selectedIndices, activeSelectTarget, isPlaying]);
+  }, [points, tempPoints, pathData, containerSize, resolution, scale, offsetX, offsetY, selectedIndices, activeSelectTarget, isPlaying, importedPaths]);
+
+  // 为了能在 requestAnimationFrame 回调中获取最新状态而不重新绑定
+  const stateRef = useRef({ isPlaying, playSpeed, pathDataLength: pathData.length, importedPaths });
+  useEffect(() => {
+    stateRef.current = { isPlaying, playSpeed, pathDataLength: pathData.length, importedPaths };
+  }, [isPlaying, playSpeed, pathData.length, importedPaths]);
 
   // 处理游动动画帧
   const animatePlay = useCallback((time: number) => {
@@ -375,35 +553,68 @@ export default function Home() {
     const deltaTime = (time - lastTimeRef.current) / 1000; // 转换为秒
     lastTimeRef.current = time;
 
-    // 速度定义：playSpeed 表示每秒经过的点数。例如 playSpeed=1 表示1秒经过1个点（从 index 到 index+1）
-    const progressDelta = deltaTime * playSpeed;
-    
-    playProgressRef.current += progressDelta;
+    const state = stateRef.current;
 
-    if (playProgressRef.current >= pathData.length - 1) {
-      // 游到了终点，循环播放
-      playProgressRef.current = 0;
+    // 更新主路径鱼的进度
+    if (state.isPlaying) {
+      const progressDelta = deltaTime * state.playSpeed;
+      playProgressRef.current += progressDelta;
+      if (playProgressRef.current >= state.pathDataLength - 1) {
+        playProgressRef.current = 0;
+      }
     }
+
+    // 更新导入路径鱼的进度
+    state.importedPaths.forEach(ip => {
+      if (ip.isPlaying && ip.data && ip.data.length > 1) {
+        if (importedProgressesRef.current[ip.id] === undefined) {
+          importedProgressesRef.current[ip.id] = 0;
+        }
+        importedProgressesRef.current[ip.id] += deltaTime * ip.speed;
+        if (importedProgressesRef.current[ip.id] >= ip.data.length - 1) {
+          importedProgressesRef.current[ip.id] = 0;
+        }
+      }
+    });
 
     draw(); // 强制触发重绘
     animationFrameRef.current = requestAnimationFrame(animatePlay);
-  }, [draw, pathData.length, playSpeed]);
+  }, [draw]);
 
   useEffect(() => {
-    if (isPlaying) {
+    const hasAnyPlaying = isPlaying || importedPaths.some(p => p.isPlaying);
+    
+    if (hasAnyPlaying) {
       lastTimeRef.current = performance.now();
-      animationFrameRef.current = requestAnimationFrame(animatePlay);
-    } else {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
+      if (animationFrameRef.current === undefined) {
+        animationFrameRef.current = requestAnimationFrame(animatePlay);
       }
-      playProgressRef.current = 0; // 停止时重置进度
-      draw(); // 恢复无鱼状态的重绘
+    } else {
+      if (animationFrameRef.current !== undefined) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = undefined;
+      }
+      
+      // 停止时重置主路径进度，使其下一次从头开始
+      if (!isPlaying) {
+        playProgressRef.current = 0;
+      }
+      // 停止时重置所有未在播放的导入路径进度
+      importedPaths.forEach(ip => {
+        if (!ip.isPlaying) {
+          importedProgressesRef.current[ip.id] = 0;
+        }
+      });
+      
+      draw(); // 恢复静止状态的重绘
     }
     return () => {
-      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      if (animationFrameRef.current !== undefined) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = undefined;
+      }
     };
-  }, [isPlaying, animatePlay, draw]);
+  }, [isPlaying, importedPaths, animatePlay, draw]);
 
   useEffect(() => {
     draw();
@@ -584,6 +795,8 @@ export default function Home() {
     setTempPoints([]);
     setSelectedIndices([]);
     setActiveSelectTarget(null);
+    setIsPlaying(false);
+    playProgressRef.current = 0;
   };
 
   const handleApplySegment = () => {
@@ -591,6 +804,8 @@ export default function Home() {
       const newPoints = resampleSegment(points, selectedIndices[0], selectedIndices[1], segmentTargetCount);
       commitPoints(newPoints);
       setSelectedIndices([]);
+      setIsPlaying(false);
+      playProgressRef.current = 0;
     }
   };
 
@@ -716,6 +931,122 @@ export default function Home() {
         {/* 左侧控制面板 */}
         <aside className="w-72 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-2xl h-full">
           <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent min-h-0 flex flex-col">
+            <div className="border-b border-slate-800 shrink-0 flex flex-col">
+              <button 
+                onClick={() => setIsImportSettingsOpen(!isImportSettingsOpen)}
+                className="w-full p-6 flex items-center justify-between text-slate-200 font-semibold hover:bg-slate-800/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Upload size={18} className="text-pink-500" />
+                  <h2>导入与多路径模拟</h2>
+                </div>
+                {isImportSettingsOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+              </button>
+              
+              {isImportSettingsOpen && (
+                <div className="px-6 pb-6 flex flex-col flex-1 min-h-[200px]">
+                  <label className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-slate-800 hover:bg-pink-900/30 text-slate-300 hover:text-pink-400 border border-slate-700 hover:border-pink-500/50 rounded-lg transition-colors text-xs cursor-pointer mb-4 shrink-0">
+                    <Upload size={14} />
+                    <span>上传 .dat 路径文件 (支持多选)</span>
+                    <input 
+                      type="file" 
+                      accept=".dat" 
+                      multiple 
+                      onChange={handleFileUpload}
+                      className="hidden" 
+                    />
+                  </label>
+
+                  <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent pr-2">
+                    {importedPaths.length === 0 ? (
+                      <p className="text-xs text-slate-500 text-center mt-4">暂无导入的路径</p>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-2 mb-2 bg-slate-800/50 p-2 rounded border border-slate-700/50">
+                          <span className="text-xs text-slate-400">全部操作：</span>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={playAllImportedPaths}
+                              className="p-1.5 bg-amber-900/40 hover:bg-amber-900/60 text-amber-400 rounded transition-colors"
+                              title="全部开始"
+                            >
+                              <Play size={12} />
+                            </button>
+                            <button
+                              onClick={stopAllImportedPaths}
+                              className="p-1.5 bg-rose-900/40 hover:bg-rose-900/60 text-rose-400 rounded transition-colors"
+                              title="全部停止"
+                            >
+                              <Square size={12} />
+                            </button>
+                            <button
+                              onClick={clearAllImportedPaths}
+                              className="p-1.5 bg-red-900/40 hover:bg-red-900/60 text-red-400 rounded transition-colors ml-2"
+                              title="全部删除"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+                        {importedPaths.map(ip => (
+                          <div key={ip.id} className="bg-slate-950 border border-slate-800 rounded p-3">
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-2 overflow-hidden">
+                                <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: ip.color }}></div>
+                                <span className="text-xs text-slate-300 truncate" title={ip.name}>{ip.name}</span>
+                              </div>
+                              <button 
+                                onClick={() => removeImportedPath(ip.id)}
+                                className="text-slate-500 hover:text-red-400 transition-colors shrink-0 ml-2"
+                                title="删除"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                            
+                            <div className="flex items-center gap-3">
+                              <div className="flex-1">
+                                <label className="flex justify-between text-[10px] text-slate-500 mb-1">
+                                  <span>速度</span>
+                                  <span className="text-amber-400">{ip.speed}</span>
+                                </label>
+                                <input
+                                  type="range"
+                                  min="1"
+                                  max="100"
+                                  step="1"
+                                  value={ip.speed}
+                                  onChange={(e) => updateImportedPath(ip.id, { speed: Number(e.target.value) })}
+                                  className="w-full accent-amber-500 h-1"
+                                />
+                              </div>
+                              
+                              <button
+                                onClick={() => {
+                                  if (ip.isPlaying) {
+                                    importedProgressesRef.current[ip.id] = 0;
+                                  }
+                                  updateImportedPath(ip.id, { isPlaying: !ip.isPlaying });
+                                }}
+                                className={`shrink-0 p-1.5 rounded transition-colors ${
+                                  ip.isPlaying 
+                                    ? 'bg-rose-900/40 text-rose-400 hover:bg-rose-900/60' 
+                                    : 'bg-amber-900/40 text-amber-400 hover:bg-amber-900/60'
+                                }`}
+                                title={ip.isPlaying ? "停止模拟" : "开始模拟"}
+                              >
+                                {ip.isPlaying ? <Square size={12} /> : <Play size={12} />}
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="border-b border-slate-800 shrink-0">
               <button 
                 onClick={() => setIsResolutionSettingsOpen(!isResolutionSettingsOpen)}
@@ -860,7 +1191,12 @@ export default function Home() {
                       * 速度为 1 表示游过相邻两点耗时 1 秒。值为 10 表示耗时 1/10 秒。
                     </p>
                     <button
-                      onClick={() => setIsPlaying(!isPlaying)}
+                      onClick={() => {
+                        if (isPlaying) {
+                          playProgressRef.current = 0;
+                        }
+                        setIsPlaying(!isPlaying);
+                      }}
                       disabled={pathData.length < 2}
                       className={`w-full flex items-center justify-center gap-2 py-2 px-4 border rounded-lg transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed ${
                         isPlaying 

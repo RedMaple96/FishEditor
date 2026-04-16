@@ -1,9 +1,18 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { MousePointer2, MousePointerClick, PenTool, Trash2, Download, Settings, Copy, Check, Fish, Undo, Redo, FlipHorizontal, FlipVertical, Repeat, FileDown, ImageDown, Play, Square, ChevronDown, ChevronRight, Upload } from 'lucide-react';
 import { Point, PathPoint, douglasPeucker, calculateAngles, bezierSpline, resamplePath, resampleSegment } from '../utils/path';
+import * as PIXI from "pixi.js";
+import { TextureAtlas, AtlasAttachmentLoader, SkeletonJson, Spine } from "@pixi-spine/all-3.8";
+import { AtlasAttachmentLoader as AtlasAttachmentLoader37, SkeletonJson as SkeletonJson37, Spine as Spine37 } from "@pixi-spine/runtime-3.7";
+import { FishResource, parseFilesToFishResources, revokeFishResourceObjectUrls } from "@/utils/fishFileParser";
 
 // 定义绘制模式
 type DrawMode = 'freehand' | 'keypoint';
+
+// @ts-ignore
+PIXI.Assets.setPreferences({
+  preferWorkers: false
+});
 
 interface ImportedPath {
   id: string;
@@ -12,6 +21,7 @@ interface ImportedPath {
   speed: number;
   isPlaying: boolean;
   color: string;
+  fishResourceId: string | null;
 }
 
 export default function Home() {
@@ -145,6 +155,10 @@ export default function Home() {
   
   // 导出相关状态
   const [pathData, setPathData] = useState<PathPoint[]>([]);
+  const pathDataRef = useRef<PathPoint[]>([]);
+  useEffect(() => {
+    pathDataRef.current = pathData;
+  }, [pathData]);
   const [isCopied, setIsCopied] = useState(false);
   const [exportFilename, setExportFilename] = useState('path00001');
 
@@ -158,6 +172,38 @@ export default function Home() {
   // 导入与多路径模拟状态
   const [importedPaths, setImportedPaths] = useState<ImportedPath[]>([]);
   const importedProgressesRef = useRef<Record<string, number>>({});
+
+  // 鱼资源与动画
+  const [fishResources, setFishResources] = useState<FishResource[]>([]);
+  const [selectedFishResourceId, setSelectedFishResourceId] = useState<string | null>(null);
+  const [fishScale, setFishScale] = useState(1);
+  const [isFishResourcesOpen, setIsFishResourcesOpen] = useState(false);
+  const fishScaleRef = useRef(1);
+  useEffect(() => {
+    fishScaleRef.current = fishScale;
+  }, [fishScale]);
+  const fishResourcesRef = useRef<FishResource[]>([]);
+  useEffect(() => {
+    fishResourcesRef.current = fishResources;
+  }, [fishResources]);
+  const fishFactoryMapRef = useRef<Record<string, (() => PIXI.DisplayObject) | null>>({});
+  const fishLoadTokensRef = useRef<Record<string, number>>({});
+  const [fishFactoryStatus, setFishFactoryStatus] = useState<Record<string, "loading" | "ready" | "error">>({});
+  const isFishFactoryReady = useCallback(
+    (id: string | null | undefined) => {
+      if (!id) return false;
+      return fishFactoryStatus[id] === "ready" && typeof fishFactoryMapRef.current[id] === "function";
+    },
+    [fishFactoryStatus]
+  );
+  const fishFactoryStatusRef = useRef<Record<string, "loading" | "ready" | "error">>({});
+  useEffect(() => {
+    fishFactoryStatusRef.current = fishFactoryStatus;
+  }, [fishFactoryStatus]);
+  const selectedFishResourceIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedFishResourceIdRef.current = selectedFishResourceId;
+  }, [selectedFishResourceId]);
   
   // 处理上传的 .dat 文件
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -185,7 +231,8 @@ export default function Home() {
             data,
             speed: 10,
             isPlaying: false,
-            color: colors[Math.floor(Math.random() * colors.length)]
+            color: colors[Math.floor(Math.random() * colors.length)],
+            fishResourceId: null
           });
           importedProgressesRef.current[id] = 0;
         }
@@ -197,6 +244,65 @@ export default function Home() {
     setImportedPaths(prev => [...prev, ...newPaths]);
     e.target.value = ''; // reset input
   };
+
+  const handleFishResourceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    try {
+      const newResources = await parseFilesToFishResources(Array.from(files));
+      if (newResources.length === 0) return;
+
+      setFishResources((prev) => [...prev, ...newResources]);
+      setSelectedFishResourceId((prev) => prev ?? newResources[0].id);
+    } finally {
+      e.target.value = "";
+    }
+  };
+
+  const removeFishResource = (id: string) => {
+    setFishResources((prev) => {
+      const r = prev.find((x) => x.id === id);
+      if (r) revokeFishResourceObjectUrls(r);
+      return prev.filter((x) => x.id !== id);
+    });
+    setSelectedFishResourceId((prev) => (prev === id ? null : prev));
+    setImportedPaths((prev) => prev.map((p) => (p.fishResourceId === id ? { ...p, fishResourceId: null } : p)));
+    setFishFactoryStatus((prev) => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    delete fishFactoryMapRef.current[id];
+    delete fishLoadTokensRef.current[id];
+    const layer = pixiFishLayerRef.current;
+    Object.entries(pixiFishInstancesRef.current).forEach(([key, entry]) => {
+      if (entry.resourceId !== id) return;
+      if (layer) layer.removeChild(entry.obj);
+      entry.obj.destroy({ children: true });
+      delete pixiFishInstancesRef.current[key];
+    });
+  };
+
+  const clearAllFishResources = () => {
+    setFishResources((prev) => {
+      prev.forEach(revokeFishResourceObjectUrls);
+      return [];
+    });
+    setSelectedFishResourceId(null);
+    setImportedPaths((prev) => prev.map((p) => ({ ...p, fishResourceId: null })));
+    setFishFactoryStatus({});
+    fishFactoryMapRef.current = {};
+    fishLoadTokensRef.current = {};
+    destroyAllPixiFish();
+  };
+
+  useEffect(() => {
+    return () => {
+      fishResourcesRef.current.forEach(revokeFishResourceObjectUrls);
+    };
+  }, []);
 
   const removeImportedPath = (id: string) => {
     setImportedPaths(prev => prev.filter(p => p.id !== id));
@@ -228,7 +334,322 @@ export default function Home() {
   // 画布和容器引用
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const pixiMountRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+
+  const pixiAppRef = useRef<PIXI.Application | null>(null);
+  const pixiWorldRef = useRef<PIXI.Container | null>(null);
+  const pixiFishLayerRef = useRef<PIXI.Container | null>(null);
+  const pixiFishInstancesRef = useRef<Record<string, { obj: PIXI.DisplayObject; resourceId: string | null }>>({});
+
+  const destroyAllPixiFish = useCallback(() => {
+    const layer = pixiFishLayerRef.current;
+    if (!layer) {
+      pixiFishInstancesRef.current = {};
+      return;
+    }
+
+    Object.values(pixiFishInstancesRef.current).forEach(({ obj }) => {
+      layer.removeChild(obj);
+      obj.destroy({ children: true });
+    });
+    pixiFishInstancesRef.current = {};
+  }, []);
+
+  const parsePlistFrames = useCallback((xmlStr: string) => {
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(xmlStr, "text/xml");
+    const dict = xml.getElementsByTagName("dict")[0];
+    if (!dict) return null;
+
+    const children = Array.from(dict.children);
+    const framesKeyIndex = children.findIndex((n) => n.tagName === "key" && n.textContent === "frames");
+    if (framesKeyIndex < 0) return null;
+    const framesDict = children[framesKeyIndex + 1];
+    if (!framesDict || framesDict.tagName !== "dict") return null;
+
+    const frameChildren = Array.from(framesDict.children);
+    const frames: Record<string, Record<string, string>> = {};
+
+    for (let i = 0; i < frameChildren.length; i += 2) {
+      const keyNode = frameChildren[i];
+      const valueNode = frameChildren[i + 1];
+      if (!keyNode || !valueNode) continue;
+      if (keyNode.tagName !== "key" || valueNode.tagName !== "dict") continue;
+
+      const frameName = keyNode.textContent || "";
+      if (!frameName) continue;
+
+      const dictChildren = Array.from(valueNode.children);
+      const props: Record<string, string> = {};
+      for (let j = 0; j < dictChildren.length; j += 2) {
+        const k = dictChildren[j];
+        const v = dictChildren[j + 1];
+        if (!k || !v) continue;
+        if (k.tagName !== "key") continue;
+        props[k.textContent || ""] = v.textContent || "";
+      }
+      frames[frameName] = props;
+    }
+
+    return frames;
+  }, []);
+
+  const loadSpriteSheetTextures = useCallback(async (resource: FishResource) => {
+    const plistFile = resource.files.find((f) => f.name.toLowerCase().endsWith(".plist"));
+    const pngUrl = resource.spineData?.png;
+    if (!plistFile || !pngUrl) return null;
+
+    const plistText = await plistFile.text();
+    const frames = parsePlistFrames(plistText);
+    if (!frames) return null;
+
+    const imageTexture = await PIXI.Texture.fromURL(pngUrl);
+
+    const textures: PIXI.Texture[] = [];
+    const frameKeys = Object.keys(frames).sort((a, b) => a.localeCompare(b));
+
+    for (const key of frameKeys) {
+      const frame = frames[key];
+      const frameStr = frame.frame || frame.textureRect;
+      if (!frameStr) continue;
+
+      const match = frameStr.match(/\{\{(-?\d+),(-?\d+)\},\{(\d+),(\d+)\}\}/);
+      if (!match) continue;
+      const x = parseInt(match[1], 10);
+      const y = parseInt(match[2], 10);
+      const w = parseInt(match[3], 10);
+      const h = parseInt(match[4], 10);
+
+      const rect = new PIXI.Rectangle(x, y, w, h);
+      const rotated = frame.rotated === "true";
+
+      let orig: PIXI.Rectangle | undefined;
+      const sourceSizeStr = frame.sourceSize;
+      if (sourceSizeStr) {
+        const sizeMatch = sourceSizeStr.match(/\{(\d+),(\d+)\}/);
+        if (sizeMatch) {
+          orig = new PIXI.Rectangle(0, 0, parseInt(sizeMatch[1], 10), parseInt(sizeMatch[2], 10));
+        }
+      }
+      if (!orig) orig = new PIXI.Rectangle(0, 0, rotated ? h : w, rotated ? w : h);
+
+      let trim: PIXI.Rectangle | undefined;
+      const offsetStr = frame.offset;
+      if (offsetStr) {
+        const offsetMatch = offsetStr.match(/\{(-?\d+),(-?\d+)\}/);
+        if (offsetMatch) {
+          const ox = parseInt(offsetMatch[1], 10);
+          const oy = parseInt(offsetMatch[2], 10);
+          const frameW = rotated ? h : w;
+          const frameH = rotated ? w : h;
+          const trimX = Math.floor((orig.width - frameW) / 2 + ox);
+          const trimY = Math.floor((orig.height - frameH) / 2 - oy);
+          trim = new PIXI.Rectangle(trimX, trimY, frameW, frameH);
+        }
+      }
+
+      const tex = new PIXI.Texture(imageTexture.baseTexture, rect, orig, trim, rotated ? 2 : 0);
+      textures.push(tex);
+    }
+
+    if (textures.length === 0) return null;
+    return textures;
+  }, [parsePlistFrames]);
+
+  const loadSpineSkeletonData = useCallback(async (resource: FishResource) => {
+    const jsonUrl = resource.spineData?.json;
+    const atlasUrl = resource.spineData?.atlas;
+    const pngs = resource.spineData?.pngs;
+    if (!jsonUrl || !atlasUrl || !pngs) return null;
+
+    const jsonData = await fetch(jsonUrl).then((r) => r.json());
+    const atlasText = await fetch(atlasUrl).then((r) => r.text());
+
+    const textureMap: Record<string, PIXI.Texture> = {};
+    for (const [name, url] of Object.entries(pngs)) {
+      textureMap[name] = await PIXI.Texture.fromURL(url);
+    }
+    const textureLoader = (line: string, callback: (bt: PIXI.BaseTexture) => void) => {
+      const t =
+        textureMap[line] ||
+        textureMap[line.split("/").pop() || ""] ||
+        textureMap[Object.keys(textureMap)[0]];
+      if (t) callback(t.baseTexture);
+    };
+
+    try {
+      if (jsonData?.skeleton?.spine) {
+        const spineVer: string = jsonData.skeleton.spine;
+        const skinsIsArray = Array.isArray(jsonData.skins);
+        if (skinsIsArray && !spineVer.startsWith("3.8")) {
+          jsonData.skeleton.spine = "3.8.0";
+        } else if (spineVer.startsWith("3.7") || spineVer.startsWith("2.") || spineVer.startsWith("3.6")) {
+          throw new Error(`Spine ${spineVer} detected, forcing fallback`);
+        }
+      }
+
+      const atlas = new TextureAtlas(atlasText, textureLoader);
+      const atlasAttachmentLoader = new AtlasAttachmentLoader(atlas);
+      const skeletonJson = new SkeletonJson(atlasAttachmentLoader);
+      const skeletonData = skeletonJson.readSkeletonData(jsonData);
+      return { kind: "spine38" as const, skeletonData };
+    } catch {
+      const atlas37 = new TextureAtlas(atlasText, textureLoader);
+      const atlasLoader37 = new AtlasAttachmentLoader37(atlas37);
+      const skeletonJson37 = new SkeletonJson37(atlasLoader37);
+      const skeletonData37 = skeletonJson37.readSkeletonData(jsonData);
+      return { kind: "spine37" as const, skeletonData: skeletonData37 };
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!pixiMountRef.current) return;
+    if (pixiAppRef.current) return;
+
+    const app = new PIXI.Application({
+      width: 1,
+      height: 1,
+      backgroundAlpha: 0,
+      resolution: window.devicePixelRatio || 1,
+      autoDensity: true,
+    });
+    pixiMountRef.current.appendChild(app.view as unknown as HTMLElement);
+    pixiAppRef.current = app;
+
+    const world = new PIXI.Container();
+    const fishLayer = new PIXI.Container();
+    world.addChild(fishLayer);
+    app.stage.addChild(world);
+    pixiWorldRef.current = world;
+    pixiFishLayerRef.current = fishLayer;
+    app.stop();
+
+    return () => {
+      destroyAllPixiFish();
+      app.destroy(true);
+      pixiAppRef.current = null;
+      pixiWorldRef.current = null;
+      pixiFishLayerRef.current = null;
+    };
+  }, [destroyAllPixiFish]);
+
+  useEffect(() => {
+    const app = pixiAppRef.current;
+    if (!app) return;
+    if (!(containerSize.width > 0 && containerSize.height > 0)) return;
+    app.renderer.resize(containerSize.width, containerSize.height);
+  }, [containerSize.width, containerSize.height]);
+
+  const createFishFactory = useCallback(
+    async (resource: FishResource) => {
+      if (resource.type === "image") {
+        const url = resource.url;
+        if (!url) return null;
+        const texture = await PIXI.Texture.fromURL(url);
+        return () => {
+          const sp = new PIXI.Sprite(texture);
+          sp.anchor.set(0.5);
+          return sp;
+        };
+      }
+
+      if (resource.type === "spritesheet") {
+        const textures = await loadSpriteSheetTextures(resource);
+        if (!textures) return null;
+        return () => {
+          const anim = new PIXI.AnimatedSprite(textures);
+          anim.anchor.set(0.5);
+          anim.animationSpeed = 0.15;
+          anim.loop = true;
+          anim.play();
+          return anim;
+        };
+      }
+
+      const spineData = await loadSpineSkeletonData(resource);
+      if (!spineData) return null;
+      return () => {
+        if (spineData.kind === "spine38") {
+          const spineObj = new Spine(spineData.skeletonData);
+          const firstAnim = spineObj.spineData.animations[0]?.name;
+          if (firstAnim) spineObj.state.setAnimation(0, firstAnim, true);
+          const b = spineObj.getLocalBounds();
+          spineObj.pivot.set(b.x + b.width / 2, b.y + b.height / 2);
+          return spineObj as unknown as PIXI.DisplayObject;
+        }
+
+        const spineObj37 = new Spine37(spineData.skeletonData);
+        const firstAnim = (spineObj37 as any).spineData?.animations?.[0]?.name;
+        if (firstAnim) (spineObj37 as any).state.setAnimation(0, firstAnim, true);
+        const b = (spineObj37 as any).getLocalBounds?.() as PIXI.Rectangle | undefined;
+        if (b) (spineObj37 as any).pivot?.set(b.x + b.width / 2, b.y + b.height / 2);
+        return spineObj37 as unknown as PIXI.DisplayObject;
+      };
+    },
+    [loadSpineSkeletonData, loadSpriteSheetTextures]
+  );
+
+  useEffect(() => {
+    const existingIds = new Set(fishResources.map((r) => r.id));
+
+    setFishFactoryStatus((prev) => {
+      let changed = false;
+      const next: Record<string, "loading" | "ready" | "error"> = {};
+      Object.entries(prev).forEach(([k, v]) => {
+        if (existingIds.has(k)) next[k] = v;
+        else changed = true;
+      });
+      if (!changed) return prev;
+      return next;
+    });
+
+    Object.keys(fishFactoryMapRef.current).forEach((id) => {
+      if (existingIds.has(id)) return;
+      delete fishFactoryMapRef.current[id];
+      delete fishLoadTokensRef.current[id];
+    });
+  }, [fishResources]);
+
+  useEffect(() => {
+    const existingIds = new Set(fishResources.map((r) => r.id));
+
+    const neededIds = new Set<string>();
+    if (selectedFishResourceId) neededIds.add(selectedFishResourceId);
+    importedPaths.forEach((p) => {
+      if (p.fishResourceId) neededIds.add(p.fishResourceId);
+    });
+
+    neededIds.forEach((id) => {
+      if (!existingIds.has(id)) return;
+      const status = fishFactoryStatusRef.current[id];
+      if (status === "ready" && typeof fishFactoryMapRef.current[id] === "function") return;
+      if (status === "loading") return;
+
+      setFishFactoryStatus((prev) => {
+        if (prev[id] === "loading") return prev;
+        return { ...prev, [id]: "loading" };
+      });
+
+      const token = (fishLoadTokensRef.current[id] || 0) + 1;
+      fishLoadTokensRef.current[id] = token;
+
+      const resource = fishResources.find((r) => r.id === id);
+      if (!resource) return;
+
+      void createFishFactory(resource)
+        .then((factory) => {
+          if (fishLoadTokensRef.current[id] !== token) return;
+          fishFactoryMapRef.current[id] = factory;
+          setFishFactoryStatus((prev) => ({ ...prev, [id]: factory ? "ready" : "error" }));
+        })
+        .catch(() => {
+          if (fishLoadTokensRef.current[id] !== token) return;
+          fishFactoryMapRef.current[id] = null;
+          setFishFactoryStatus((prev) => ({ ...prev, [id]: "error" }));
+        });
+    });
+  }, [createFishFactory, fishResources, importedPaths, selectedFishResourceId]);
 
   // 自由缩放和平移状态
   const [userScale, setUserScale] = useState(1);
@@ -261,6 +682,13 @@ export default function Home() {
   const scale = baseScale * userScale;
   const offsetX = baseOffsetX + panOffset.x;
   const offsetY = baseOffsetY + panOffset.y;
+
+  useEffect(() => {
+    const world = pixiWorldRef.current;
+    if (!world) return;
+    world.position.set(offsetX, offsetY + resolution.height * scale);
+    world.scale.set(scale, -scale);
+  }, [offsetX, offsetY, scale, resolution.height]);
 
   // 监听并计算路径数据
   useEffect(() => {
@@ -406,8 +834,10 @@ export default function Home() {
       }
     });
 
+    const mainUsesPixiFish = isPlaying && isFishFactoryReady(selectedFishResourceId);
+
     // 绘制游动的模拟鱼
-    if (isPlaying && pathData.length > 1) {
+    if (!mainUsesPixiFish && isPlaying && pathData.length > 1) {
       const progress = playProgressRef.current;
       const index = Math.floor(progress);
       const nextIndex = Math.min(index + 1, pathData.length - 1);
@@ -486,7 +916,8 @@ export default function Home() {
       ctx.shadowBlur = 0;
 
       // 绘制导入路径上的模拟鱼
-      if (ip.isPlaying && ip.data && ip.data.length > 1) {
+      const importedUsesPixiFish = ip.isPlaying && isFishFactoryReady(ip.fishResourceId);
+      if (!importedUsesPixiFish && ip.isPlaying && ip.data && ip.data.length > 1) {
         const progress = importedProgressesRef.current[ip.id] || 0;
         const index = Math.floor(progress);
         const nextIndex = Math.min(index + 1, ip.data.length - 1);
@@ -539,13 +970,122 @@ export default function Home() {
 
     ctx.restore();
 
-  }, [points, tempPoints, pathData, containerSize, resolution, scale, offsetX, offsetY, selectedIndices, activeSelectTarget, isPlaying, importedPaths]);
+  }, [points, tempPoints, pathData, containerSize, resolution, scale, offsetX, offsetY, selectedIndices, activeSelectTarget, isPlaying, importedPaths, isFishFactoryReady, selectedFishResourceId]);
 
   // 为了能在 requestAnimationFrame 回调中获取最新状态而不重新绑定
   const stateRef = useRef({ isPlaying, playSpeed, pathDataLength: pathData.length, importedPaths });
   useEffect(() => {
     stateRef.current = { isPlaying, playSpeed, pathDataLength: pathData.length, importedPaths };
   }, [isPlaying, playSpeed, pathData.length, importedPaths]);
+
+  const syncPixiFishPositions = useCallback(() => {
+    const app = pixiAppRef.current;
+    const layer = pixiFishLayerRef.current;
+    if (!app || !layer) {
+      Object.values(pixiFishInstancesRef.current).forEach(({ obj }) => {
+        obj.visible = false;
+      });
+      return;
+    }
+
+    const activeKeys = new Set<string>();
+    const fishScaleValue = fishScaleRef.current;
+    const state = stateRef.current;
+
+    const getFactory = (resourceId: string | null) => {
+      if (!resourceId) return null;
+      if (fishFactoryStatusRef.current[resourceId] !== "ready") return null;
+      const f = fishFactoryMapRef.current[resourceId];
+      return typeof f === "function" ? f : null;
+    };
+
+    const upsert = (key: string, resourceId: string | null, x: number, y: number, angle: number) => {
+      const factory = getFactory(resourceId);
+      if (!factory) {
+        const entry = pixiFishInstancesRef.current[key];
+        if (entry) entry.obj.visible = false;
+        return;
+      }
+
+      const entry = pixiFishInstancesRef.current[key];
+      if (!entry || entry.resourceId !== resourceId) {
+        if (entry) {
+          layer.removeChild(entry.obj);
+          entry.obj.destroy({ children: true });
+        }
+        const obj = factory();
+        pixiFishInstancesRef.current[key] = { obj, resourceId };
+        layer.addChild(obj);
+      }
+
+      const obj = pixiFishInstancesRef.current[key].obj;
+      obj.visible = true;
+      obj.position.set(x, y);
+      
+      // 注意：由于 Canvas 坐标系 Y 轴向下，计算角度时加了负号（参考 path.ts / 原始 draw() 逻辑）
+      // 因此旋转时要使用 -angle 才能与路径切线方向匹配
+      obj.rotation = -angle * (Math.PI / 180);
+      
+      // 因为全局世界容器已经被设置为 scale.y = -1 翻转了（让坐标系原点位于左下角，Y轴向上）
+      // 这会导致附着在上面的 Sprite 发生上下颠倒。
+      // 这里只需要把 Y 的缩放再翻转一次为负数，就能抵消世界容器的翻转效果，保持图片本身的“正”立。
+      const absScale = Math.abs(fishScaleValue);
+      obj.scale.set(absScale, -absScale);
+      
+      activeKeys.add(key);
+    };
+
+    if (state.isPlaying) {
+      const data = pathDataRef.current;
+      if (data.length > 1) {
+        const progress = playProgressRef.current;
+        const index = Math.floor(progress);
+        const nextIndex = Math.min(index + 1, data.length - 1);
+        const t = progress - index;
+        const p1 = data[index];
+        const p2 = data[nextIndex];
+        if (p1 && p2) {
+          const x = p1.x + (p2.x - p1.x) * t;
+          const y = p1.y + (p2.y - p1.y) * t;
+          let a1 = p1.angle;
+          let a2 = p2.angle;
+          let diff = a2 - a1;
+          while (diff < -180) diff += 360;
+          while (diff > 180) diff -= 360;
+          const angle = a1 + diff * t;
+          upsert("main", selectedFishResourceIdRef.current, x, y, angle);
+        }
+      }
+    }
+
+    state.importedPaths.forEach((ip) => {
+      if (!ip.isPlaying) return;
+      const data = ip.data;
+      if (!data || data.length < 2) return;
+
+      const progress = importedProgressesRef.current[ip.id] || 0;
+      const index = Math.floor(progress);
+      const nextIndex = Math.min(index + 1, data.length - 1);
+      const t = progress - index;
+      const p1 = data[index];
+      const p2 = data[nextIndex];
+      if (!p1 || !p2) return;
+
+      const x = p1.x + (p2.x - p1.x) * t;
+      const y = p1.y + (p2.y - p1.y) * t;
+      let a1 = p1.angle;
+      let a2 = p2.angle;
+      let diff = a2 - a1;
+      while (diff < -180) diff += 360;
+      while (diff > 180) diff -= 360;
+      const angle = a1 + diff * t;
+      upsert(ip.id, ip.fishResourceId, x, y, angle);
+    });
+
+    Object.entries(pixiFishInstancesRef.current).forEach(([key, entry]) => {
+      if (!activeKeys.has(key)) entry.obj.visible = false;
+    });
+  }, []);
 
   // 处理游动动画帧
   const animatePlay = useCallback((time: number) => {
@@ -578,8 +1118,9 @@ export default function Home() {
     });
 
     draw(); // 强制触发重绘
+    syncPixiFishPositions();
     animationFrameRef.current = requestAnimationFrame(animatePlay);
-  }, [draw]);
+  }, [draw, syncPixiFishPositions]);
 
   useEffect(() => {
     const hasAnyPlaying = isPlaying || importedPaths.some(p => p.isPlaying);
@@ -588,6 +1129,10 @@ export default function Home() {
       lastTimeRef.current = performance.now();
       if (animationFrameRef.current === undefined) {
         animationFrameRef.current = requestAnimationFrame(animatePlay);
+      }
+      const app = pixiAppRef.current;
+      if (app) {
+        app.start();
       }
     } else {
       if (animationFrameRef.current !== undefined) {
@@ -607,6 +1152,13 @@ export default function Home() {
       });
       
       draw(); // 恢复静止状态的重绘
+      syncPixiFishPositions();
+
+      const app = pixiAppRef.current;
+      if (app) {
+        app.renderer.render(app.stage);
+        app.stop();
+      }
     }
     return () => {
       if (animationFrameRef.current !== undefined) {
@@ -614,7 +1166,7 @@ export default function Home() {
         animationFrameRef.current = undefined;
       }
     };
-  }, [isPlaying, importedPaths, animatePlay, draw]);
+  }, [isPlaying, importedPaths, animatePlay, draw, syncPixiFishPositions]);
 
   useEffect(() => {
     draw();
@@ -864,14 +1416,336 @@ export default function Home() {
   };
 
   return (
-    <div className="h-screen w-screen bg-slate-950 text-slate-300 flex flex-col font-sans overflow-hidden">
+    <div 
+      className="h-screen w-screen bg-slate-950 text-slate-300 flex flex-col font-sans overflow-hidden"
+      onClick={() => {
+        setIsImportSettingsOpen(false);
+        setIsFishResourcesOpen(false);
+        setIsResolutionSettingsOpen(false);
+      }}
+    >
       {/* 顶部导航栏 */}
-      <header className="h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 z-10 relative">
-        <div className="flex items-center gap-3 text-cyan-400">
-          <Fish size={28} className="animate-pulse" />
-          <h1 className="text-xl font-bold tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500">
-            Fish Path Editor
-          </h1>
+      <header className="h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 z-50 relative">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3 text-cyan-400">
+            <Fish size={28} className="animate-pulse" />
+            <h1 className="text-xl font-bold tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 whitespace-nowrap">
+              Fish Path Editor
+            </h1>
+          </div>
+          
+          <div className="h-6 w-px bg-slate-700"></div>
+          
+          <div className="flex items-center gap-2">
+            {/* 导入与多路径模拟 */}
+            <div className="relative">
+              <button 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsImportSettingsOpen(!isImportSettingsOpen);
+                  setIsFishResourcesOpen(false);
+                  setIsResolutionSettingsOpen(false);
+                }}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-all text-sm font-medium border ${
+                  isImportSettingsOpen 
+                    ? 'bg-pink-900/30 text-pink-400 border-pink-500/50 shadow-[0_0_10px_rgba(236,72,153,0.2)]' 
+                    : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700 hover:text-slate-200'
+                }`}
+              >
+                <Upload size={14} className={isImportSettingsOpen ? "text-pink-400" : "text-pink-500"} />
+                <span>导入多路径</span>
+              </button>
+              
+              {isImportSettingsOpen && (
+                <div 
+                  className="fixed top-16 left-0 mt-2 ml-4 w-80 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl z-50 max-h-[calc(100vh-6rem)] flex flex-col overflow-hidden"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="p-4 border-b border-slate-800 bg-slate-800/50 flex justify-between items-center shrink-0">
+                    <h3 className="font-semibold text-slate-200 text-sm">导入与多路径模拟</h3>
+                    <button onClick={() => setIsImportSettingsOpen(false)} className="text-slate-500 hover:text-slate-300">×</button>
+                  </div>
+                  <div className="p-4 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+                    <label className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-slate-800 hover:bg-pink-900/30 text-slate-300 hover:text-pink-400 border border-slate-700 hover:border-pink-500/50 rounded-lg transition-colors text-xs cursor-pointer mb-4 shrink-0">
+                      <Upload size={14} />
+                      <span>上传 .dat 路径文件 (支持多选)</span>
+                      <input 
+                        type="file" 
+                        accept=".dat" 
+                        multiple 
+                        onChange={handleFileUpload}
+                        className="hidden" 
+                      />
+                    </label>
+                    
+                    {importedPaths.length > 0 && (
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg border border-slate-700">
+                          <span className="text-xs font-medium text-slate-400">全部操作:</span>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => {
+                                const allPlaying = importedPaths.every(p => p.isPlaying);
+                                const newPaths = importedPaths.map(p => ({ ...p, isPlaying: !allPlaying }));
+                                setImportedPaths(newPaths);
+                              }}
+                              className={`p-1.5 rounded transition-colors ${
+                                importedPaths.every(p => p.isPlaying)
+                                  ? 'bg-amber-900/40 text-amber-400 hover:bg-amber-900/60'
+                                  : 'bg-slate-700 text-slate-300 hover:bg-slate-600 hover:text-amber-400'
+                              }`}
+                              title={importedPaths.every(p => p.isPlaying) ? "全部暂停" : "全部播放"}
+                            >
+                              <Play size={14} className={importedPaths.every(p => p.isPlaying) ? "animate-pulse" : ""} />
+                            </button>
+                            <button
+                              onClick={() => {
+                                const newPaths = importedPaths.map(p => ({ ...p, isPlaying: false }));
+                                setImportedPaths(newPaths);
+                                // 重置进度
+                                importedPaths.forEach(ip => {
+                                  importedProgressesRef.current[ip.id] = 0;
+                                });
+                                draw();
+                                syncPixiFishPositions();
+                              }}
+                              className="p-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-rose-400 rounded transition-colors"
+                              title="全部停止"
+                            >
+                              <Square size={14} />
+                            </button>
+                            <div className="w-px bg-slate-600 mx-1"></div>
+                            <button
+                              onClick={() => setImportedPaths([])}
+                              className="p-1.5 bg-slate-700 hover:bg-red-900/50 text-slate-300 hover:text-red-400 rounded transition-colors"
+                              title="全部删除"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </div>
+
+                        {importedPaths.map(ip => (
+                          <div key={ip.id} className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-3 relative group">
+                            <div className="flex justify-between items-start">
+                              <div className="flex items-center gap-2 max-w-[80%]">
+                                <div 
+                                  className="w-3 h-3 rounded-full shrink-0" 
+                                  style={{ backgroundColor: ip.color }}
+                                />
+                                <span className="text-xs font-medium text-slate-300 truncate" title={ip.name}>
+                                  {ip.name}
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => removeImportedPath(ip.id)}
+                                className="text-slate-500 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100 absolute top-3 right-3 bg-slate-900 rounded p-0.5"
+                                title="删除"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+
+                            <div className="flex items-center gap-3">
+                              <div className="flex-1">
+                                <label className="flex justify-between text-[10px] text-slate-500 mb-1">
+                                  <span>速度</span>
+                                  <span className="text-amber-400">{ip.speed}</span>
+                                </label>
+                                <input
+                                  type="range"
+                                  min="1"
+                                  max="100"
+                                  value={ip.speed}
+                                  onChange={(e) => updateImportedPath(ip.id, { speed: Number(e.target.value) })}
+                                  className="w-full accent-amber-500 h-1"
+                                />
+                              </div>
+                              <button
+                                onClick={() => updateImportedPath(ip.id, { isPlaying: !ip.isPlaying })}
+                                className={`p-2 rounded transition-colors shrink-0 mt-3 ${
+                                  ip.isPlaying 
+                                    ? 'bg-amber-900/40 text-amber-400 border border-amber-500/30' 
+                                    : 'bg-slate-800 text-slate-400 hover:text-amber-400 hover:bg-slate-700 border border-slate-700'
+                                }`}
+                              >
+                                <Play size={14} className={ip.isPlaying ? "animate-pulse" : ""} />
+                              </button>
+                            </div>
+
+                            <div className="pt-2 border-t border-slate-800/50">
+                              <label className="block text-[10px] text-slate-500 mb-1">鱼资源</label>
+                              <select
+                                value={ip.fishResourceId || ""}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  updateImportedPath(ip.id, { fishResourceId: v ? v : null });
+                                }}
+                                className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition-all"
+                              >
+                                <option value="">默认形状</option>
+                                {fishResources.map((r) => (
+                                  <option key={r.id} value={r.id}>
+                                    {r.name} ({r.type === "spine" ? "Spine" : r.type === "spritesheet" ? "Sheet" : "Img"})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 鱼资源与动画 */}
+            <div className="relative">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsFishResourcesOpen(!isFishResourcesOpen);
+                  setIsImportSettingsOpen(false);
+                  setIsResolutionSettingsOpen(false);
+                }}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-all text-sm font-medium border ${
+                  isFishResourcesOpen 
+                    ? 'bg-amber-900/30 text-amber-400 border-amber-500/50 shadow-[0_0_10px_rgba(245,158,11,0.2)]' 
+                    : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700 hover:text-slate-200'
+                }`}
+              >
+                <Fish size={14} className={isFishResourcesOpen ? "text-amber-400" : "text-amber-500"} />
+                <span>鱼资源</span>
+              </button>
+
+              {isFishResourcesOpen && (
+                <div 
+                  className="fixed top-16 left-0 mt-2 ml-[8.5rem] w-80 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl z-50 max-h-[calc(100vh-6rem)] flex flex-col overflow-hidden"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="p-4 border-b border-slate-800 bg-slate-800/50 flex justify-between items-center shrink-0">
+                    <h3 className="font-semibold text-slate-200 text-sm">鱼资源与动画</h3>
+                    <button onClick={() => setIsFishResourcesOpen(false)} className="text-slate-500 hover:text-slate-300">×</button>
+                  </div>
+                  <div className="p-4 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+                    <label className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-slate-800 hover:bg-amber-900/30 text-slate-300 hover:text-amber-400 border border-slate-700 hover:border-amber-500/50 rounded-lg transition-colors text-xs cursor-pointer mb-4">
+                      <Upload size={14} />
+                      <span>上传鱼资源 (Spine/序列帧/图片)</span>
+                      <input
+                        type="file"
+                        accept=".png,.jpg,.jpeg,.atlas,.json,.plist"
+                        multiple
+                        onChange={handleFishResourceUpload}
+                        className="hidden"
+                      />
+                    </label>
+
+                    {fishResources.length === 0 ? (
+                      <p className="text-xs text-slate-500 text-center py-4">暂无导入的鱼资源</p>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between bg-slate-800/50 p-2 rounded border border-slate-700/50">
+                          <span className="text-xs text-slate-400">已导入：{fishResources.length}</span>
+                          <button
+                            onClick={clearAllFishResources}
+                            className="p-1.5 bg-red-900/40 hover:bg-red-900/60 text-red-400 rounded transition-colors"
+                            title="全部删除"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+
+                        <div className="space-y-2">
+                          {fishResources.map((r) => (
+                            <div
+                              key={r.id}
+                              className={`flex items-center justify-between gap-2 p-2 rounded border transition-colors ${
+                                selectedFishResourceId === r.id
+                                  ? "bg-amber-900/20 border-amber-500/50"
+                                  : "bg-slate-950 border-slate-800 hover:border-slate-600"
+                              }`}
+                            >
+                              <button
+                                onClick={() => setSelectedFishResourceId(r.id)}
+                                className="flex-1 flex items-center gap-2 overflow-hidden text-left"
+                                title="用于模拟游动"
+                              >
+                                <div className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 shrink-0">
+                                  {r.type === "spine" ? "Spine" : r.type === "spritesheet" ? "Sheet" : "Img"}
+                                </div>
+                                <span className="text-xs text-slate-200 truncate">{r.name}</span>
+                              </button>
+
+                              <button
+                                onClick={() => removeFishResource(r.id)}
+                                className="text-slate-500 hover:text-red-400 transition-colors shrink-0"
+                                title="删除"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 画布设置 */}
+            <div className="relative">
+              <button 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsResolutionSettingsOpen(!isResolutionSettingsOpen);
+                  setIsImportSettingsOpen(false);
+                  setIsFishResourcesOpen(false);
+                }}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-all text-sm font-medium border ${
+                  isResolutionSettingsOpen 
+                    ? 'bg-cyan-900/30 text-cyan-400 border-cyan-500/50 shadow-[0_0_10px_rgba(6,182,212,0.2)]' 
+                    : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700 hover:text-slate-200'
+                }`}
+              >
+                <Settings size={14} className={isResolutionSettingsOpen ? "text-cyan-400" : "text-cyan-500"} />
+                <span>画布</span>
+              </button>
+              
+              {isResolutionSettingsOpen && (
+                <div 
+                  className="fixed top-16 left-0 mt-2 ml-[15.5rem] w-64 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl z-50 max-h-[calc(100vh-6rem)] flex flex-col overflow-hidden"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="p-4 border-b border-slate-800 bg-slate-800/50 flex justify-between items-center">
+                    <h3 className="font-semibold text-slate-200 text-sm">画布设置</h3>
+                    <button onClick={() => setIsResolutionSettingsOpen(false)} className="text-slate-500 hover:text-slate-300">×</button>
+                  </div>
+                  <div className="p-4 space-y-4">
+                    <div>
+                      <label className="block text-xs text-slate-500 mb-1">分辨率宽 (Width)</label>
+                      <input
+                        type="number"
+                        value={resolution.width}
+                        onChange={(e) => setResolution(p => ({ ...p, width: Number(e.target.value) }))}
+                        className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-500 mb-1">分辨率高 (Height)</label>
+                      <input
+                        type="number"
+                        value={resolution.height}
+                        onChange={(e) => setResolution(p => ({ ...p, height: Number(e.target.value) }))}
+                        className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
         
         <div className="flex items-center gap-4">
@@ -931,158 +1805,6 @@ export default function Home() {
         {/* 左侧控制面板 */}
         <aside className="w-72 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0 z-10 shadow-2xl h-full">
           <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent min-h-0 flex flex-col">
-            <div className="border-b border-slate-800 shrink-0 flex flex-col">
-              <button 
-                onClick={() => setIsImportSettingsOpen(!isImportSettingsOpen)}
-                className="w-full p-6 flex items-center justify-between text-slate-200 font-semibold hover:bg-slate-800/50 transition-colors"
-              >
-                <div className="flex items-center gap-2">
-                  <Upload size={18} className="text-pink-500" />
-                  <h2>导入与多路径模拟</h2>
-                </div>
-                {isImportSettingsOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-              </button>
-              
-              {isImportSettingsOpen && (
-                <div className="px-6 pb-6 flex flex-col flex-1 min-h-[200px]">
-                  <label className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-slate-800 hover:bg-pink-900/30 text-slate-300 hover:text-pink-400 border border-slate-700 hover:border-pink-500/50 rounded-lg transition-colors text-xs cursor-pointer mb-4 shrink-0">
-                    <Upload size={14} />
-                    <span>上传 .dat 路径文件 (支持多选)</span>
-                    <input 
-                      type="file" 
-                      accept=".dat" 
-                      multiple 
-                      onChange={handleFileUpload}
-                      className="hidden" 
-                    />
-                  </label>
-
-                  <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent pr-2">
-                    {importedPaths.length === 0 ? (
-                      <p className="text-xs text-slate-500 text-center mt-4">暂无导入的路径</p>
-                    ) : (
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-2 mb-2 bg-slate-800/50 p-2 rounded border border-slate-700/50">
-                          <span className="text-xs text-slate-400">全部操作：</span>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={playAllImportedPaths}
-                              className="p-1.5 bg-amber-900/40 hover:bg-amber-900/60 text-amber-400 rounded transition-colors"
-                              title="全部开始"
-                            >
-                              <Play size={12} />
-                            </button>
-                            <button
-                              onClick={stopAllImportedPaths}
-                              className="p-1.5 bg-rose-900/40 hover:bg-rose-900/60 text-rose-400 rounded transition-colors"
-                              title="全部停止"
-                            >
-                              <Square size={12} />
-                            </button>
-                            <button
-                              onClick={clearAllImportedPaths}
-                              className="p-1.5 bg-red-900/40 hover:bg-red-900/60 text-red-400 rounded transition-colors ml-2"
-                              title="全部删除"
-                            >
-                              <Trash2 size={12} />
-                            </button>
-                          </div>
-                        </div>
-                        {importedPaths.map(ip => (
-                          <div key={ip.id} className="bg-slate-950 border border-slate-800 rounded p-3">
-                            <div className="flex items-center justify-between mb-2">
-                              <div className="flex items-center gap-2 overflow-hidden">
-                                <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: ip.color }}></div>
-                                <span className="text-xs text-slate-300 truncate" title={ip.name}>{ip.name}</span>
-                              </div>
-                              <button 
-                                onClick={() => removeImportedPath(ip.id)}
-                                className="text-slate-500 hover:text-red-400 transition-colors shrink-0 ml-2"
-                                title="删除"
-                              >
-                                <Trash2 size={12} />
-                              </button>
-                            </div>
-                            
-                            <div className="flex items-center gap-3">
-                              <div className="flex-1">
-                                <label className="flex justify-between text-[10px] text-slate-500 mb-1">
-                                  <span>速度</span>
-                                  <span className="text-amber-400">{ip.speed}</span>
-                                </label>
-                                <input
-                                  type="range"
-                                  min="1"
-                                  max="100"
-                                  step="1"
-                                  value={ip.speed}
-                                  onChange={(e) => updateImportedPath(ip.id, { speed: Number(e.target.value) })}
-                                  className="w-full accent-amber-500 h-1"
-                                />
-                              </div>
-                              
-                              <button
-                                onClick={() => {
-                                  if (ip.isPlaying) {
-                                    importedProgressesRef.current[ip.id] = 0;
-                                  }
-                                  updateImportedPath(ip.id, { isPlaying: !ip.isPlaying });
-                                }}
-                                className={`shrink-0 p-1.5 rounded transition-colors ${
-                                  ip.isPlaying 
-                                    ? 'bg-rose-900/40 text-rose-400 hover:bg-rose-900/60' 
-                                    : 'bg-amber-900/40 text-amber-400 hover:bg-amber-900/60'
-                                }`}
-                                title={ip.isPlaying ? "停止模拟" : "开始模拟"}
-                              >
-                                {ip.isPlaying ? <Square size={12} /> : <Play size={12} />}
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="border-b border-slate-800 shrink-0">
-              <button 
-                onClick={() => setIsResolutionSettingsOpen(!isResolutionSettingsOpen)}
-                className="w-full p-6 flex items-center justify-between text-slate-200 font-semibold hover:bg-slate-800/50 transition-colors"
-              >
-                <div className="flex items-center gap-2">
-                  <Settings size={18} className="text-cyan-500" />
-                  <h2>画布设置</h2>
-                </div>
-                {isResolutionSettingsOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-              </button>
-              
-              {isResolutionSettingsOpen && (
-                <div className="px-6 pb-6 space-y-4">
-                  <div>
-                    <label className="block text-xs text-slate-500 mb-1">分辨率宽 (Width)</label>
-                    <input
-                      type="number"
-                      value={resolution.width}
-                      onChange={(e) => setResolution(p => ({ ...p, width: Number(e.target.value) }))}
-                      className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-500 mb-1">分辨率高 (Height)</label>
-                    <input
-                      type="number"
-                      value={resolution.height}
-                      onChange={(e) => setResolution(p => ({ ...p, height: Number(e.target.value) }))}
-                      className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
             <div className="border-b border-slate-800 shrink-0">
               <button 
                 onClick={() => setIsDrawSettingsOpen(!isDrawSettingsOpen)}
@@ -1190,6 +1912,58 @@ export default function Home() {
                     <p className="text-[10px] text-slate-600 mb-3 leading-relaxed">
                       * 速度为 1 表示游过相邻两点耗时 1 秒。值为 10 表示耗时 1/10 秒。
                     </p>
+
+                    <div className="mb-3">
+                      <label className="flex justify-between text-xs text-slate-500 mb-2">
+                        <span>模拟鱼资源</span>
+                        <span className="text-slate-400">
+                          {!selectedFishResourceId
+                            ? "默认形状"
+                            : fishFactoryStatus[selectedFishResourceId] === "ready"
+                              ? "已启用"
+                              : fishFactoryStatus[selectedFishResourceId] === "error"
+                                ? "不可用"
+                                : "加载中"}
+                        </span>
+                      </label>
+                      <select
+                        value={selectedFishResourceId ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setSelectedFishResourceId(v ? v : null);
+                        }}
+                        className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition-all"
+                      >
+                        <option value="">默认形状</option>
+                        {fishResources.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.name} ({r.type === "spine" ? "Spine" : r.type === "spritesheet" ? "Sheet" : "Img"})
+                          </option>
+                        ))}
+                      </select>
+                      {selectedFishResourceId && fishFactoryStatus[selectedFishResourceId] !== "ready" && (
+                        <p className="text-[10px] text-slate-600 mt-2 leading-relaxed">
+                          * 资源加载中或不兼容时，会自动回退为默认形状。
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="mb-4">
+                      <label className="flex justify-between text-xs text-slate-500 mb-2">
+                        <span>鱼大小</span>
+                        <span className="text-amber-400">{fishScale.toFixed(2)}x</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="0.2"
+                        max="5"
+                        step="0.05"
+                        value={fishScale}
+                        onChange={(e) => setFishScale(Number(e.target.value))}
+                        className="w-full accent-amber-500"
+                      />
+                    </div>
+
                     <button
                       onClick={() => {
                         if (isPlaying) {
@@ -1354,6 +2128,7 @@ export default function Home() {
           className="flex-1 relative bg-slate-950 overflow-hidden"
           style={{ cursor: isPanning ? 'grabbing' : mode === 'freehand' ? 'crosshair' : 'crosshair' }}
         >
+          <div ref={pixiMountRef} className="absolute inset-0 pointer-events-none" />
           <canvas
             ref={canvasRef}
             width={containerSize.width}

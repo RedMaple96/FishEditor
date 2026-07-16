@@ -24,6 +24,9 @@ interface ImportedPath {
   fishResourceId: string | null;
 }
 
+// 鱼资源支持的文件扩展名
+const FISH_FILE_EXTS = ['.png', '.jpg', '.jpeg', '.atlas', '.json', '.plist'];
+
 export default function Home() {
   // 画布尺寸设置
   const [resolution, setResolution] = useState({ width: 1280, height: 720 });
@@ -173,6 +176,10 @@ export default function Home() {
   const [importedPaths, setImportedPaths] = useState<ImportedPath[]>([]);
   const importedProgressesRef = useRef<Record<string, number>>({});
 
+  // 全局拖拽导入状态
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragCounterRef = useRef(0);
+
   // 鱼资源与动画
   const [fishResources, setFishResources] = useState<FishResource[]>([]);
   const [selectedFishResourceId, setSelectedFishResourceId] = useState<string | null>(null);
@@ -205,16 +212,14 @@ export default function Home() {
     selectedFishResourceIdRef.current = selectedFishResourceId;
   }, [selectedFishResourceId]);
   
-  // 处理上传的 .dat 文件
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files) return;
+  // 处理上传的 .dat 文件（核心逻辑，可被 input 与拖拽复用）
+  const importPathFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
 
     const newPaths: ImportedPath[] = [];
     const colors = ['#38bdf8', '#a3e635', '#f472b6', '#fbbf24', '#a78bfa', '#fb923c'];
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
+    for (const file of files) {
       try {
         const text = await file.text();
         const json = JSON.parse(text);
@@ -241,24 +246,97 @@ export default function Home() {
       }
     }
 
-    setImportedPaths(prev => [...prev, ...newPaths]);
+    if (newPaths.length > 0) {
+      setImportedPaths(prev => [...prev, ...newPaths]);
+    }
+  }, []);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    await importPathFiles(Array.from(files));
     e.target.value = ''; // reset input
   };
+
+  // 处理上传的鱼资源文件（核心逻辑，可被 input 与拖拽复用）
+  const importFishFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
+
+    const newResources = await parseFilesToFishResources(files);
+    if (newResources.length === 0) return;
+
+    setFishResources((prev) => [...prev, ...newResources]);
+    setSelectedFishResourceId((prev) => prev ?? newResources[0].id);
+  }, []);
 
   const handleFishResourceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
-
     try {
-      const newResources = await parseFilesToFishResources(Array.from(files));
-      if (newResources.length === 0) return;
-
-      setFishResources((prev) => [...prev, ...newResources]);
-      setSelectedFishResourceId((prev) => prev ?? newResources[0].id);
+      await importFishFiles(Array.from(files));
     } finally {
       e.target.value = "";
     }
   };
+
+  // 根据文件扩展名把拖入的文件路由到路径导入或鱼资源导入
+  const routeDroppedFiles = useCallback((files: File[]) => {
+    const pathFiles = files.filter((f) => f.name.toLowerCase().endsWith('.dat'));
+    const fishFiles = files.filter((f) => {
+      const n = f.name.toLowerCase();
+      return FISH_FILE_EXTS.some((ext) => n.endsWith(ext));
+    });
+    if (pathFiles.length) void importPathFiles(pathFiles);
+    if (fishFiles.length) void importFishFiles(fishFiles);
+  }, [importPathFiles, importFishFiles]);
+
+  // 全局拖拽导入：监听 window 上的拖拽事件，显示遮罩并按文件类型自动路由
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => {
+      const types = e.dataTransfer?.types;
+      if (!types) return false;
+      return Array.from(types).includes('Files');
+    };
+
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      dragCounterRef.current += 1;
+      setIsDragOver(true);
+    };
+    const onDragOver = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    };
+    const onDragLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      dragCounterRef.current -= 1;
+      if (dragCounterRef.current <= 0) {
+        dragCounterRef.current = 0;
+        setIsDragOver(false);
+      }
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      dragCounterRef.current = 0;
+      setIsDragOver(false);
+      const files = Array.from(e.dataTransfer?.files || []);
+      if (files.length) routeDroppedFiles(files);
+    };
+
+    window.addEventListener('dragenter', onDragEnter);
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter);
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [routeDroppedFiles]);
 
   const removeFishResource = (id: string) => {
     setFishResources((prev) => {
@@ -1424,6 +1502,19 @@ export default function Home() {
         setIsResolutionSettingsOpen(false);
       }}
     >
+      {/* 全局拖拽导入遮罩 */}
+      {isDragOver && (
+        <div className="fixed inset-0 z-[100] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+          <div className="border-2 border-dashed border-cyan-400 rounded-2xl px-16 py-12 text-center bg-slate-900/80 shadow-2xl max-w-md">
+            <Upload size={48} className="mx-auto text-cyan-400 mb-4 animate-bounce" />
+            <p className="text-lg font-semibold text-cyan-300">松开鼠标即可导入</p>
+            <p className="text-xs text-slate-400 mt-3 leading-relaxed">
+              <span className="text-pink-400">.dat</span> 路径文件<br />
+              <span className="text-amber-400">.png / .jpg / .atlas / .json / .plist</span> 鱼资源
+            </p>
+          </div>
+        </div>
+      )}
       {/* 顶部导航栏 */}
       <header className="h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 z-50 relative">
         <div className="flex items-center gap-6">
@@ -1468,7 +1559,7 @@ export default function Home() {
                   <div className="p-4 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
                     <label className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-slate-800 hover:bg-pink-900/30 text-slate-300 hover:text-pink-400 border border-slate-700 hover:border-pink-500/50 rounded-lg transition-colors text-xs cursor-pointer mb-4 shrink-0">
                       <Upload size={14} />
-                      <span>上传 .dat 路径文件 (支持多选)</span>
+                      <span>上传 / 拖拽 .dat 路径文件 (支持多选)</span>
                       <input 
                         type="file" 
                         accept=".dat" 
@@ -1631,7 +1722,7 @@ export default function Home() {
                   <div className="p-4 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
                     <label className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-slate-800 hover:bg-amber-900/30 text-slate-300 hover:text-amber-400 border border-slate-700 hover:border-amber-500/50 rounded-lg transition-colors text-xs cursor-pointer mb-4">
                       <Upload size={14} />
-                      <span>上传鱼资源 (Spine/序列帧/图片)</span>
+                      <span>上传 / 拖拽 鱼资源 (Spine/序列帧/图片)</span>
                       <input
                         type="file"
                         accept=".png,.jpg,.jpeg,.atlas,.json,.plist"

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { MousePointer2, MousePointerClick, PenTool, Trash2, Download, Settings, Copy, Check, Fish, Undo, Redo, FlipHorizontal, FlipVertical, Repeat, FileDown, ImageDown, Play, Square, ChevronDown, ChevronRight, Upload } from 'lucide-react';
+import { MousePointer2, MousePointerClick, PenTool, Trash2, Download, Settings, Copy, Check, Fish, Undo, Redo, FlipHorizontal, FlipVertical, Repeat, FileDown, ImageDown, Play, Square, ChevronDown, ChevronRight, Upload, Pencil, SlidersHorizontal } from 'lucide-react';
 import { Point, PathPoint, douglasPeucker, calculateAngles, bezierSpline, resamplePath, resampleSegment } from '../utils/path';
 import * as PIXI from "pixi.js";
 import { TextureAtlas, AtlasAttachmentLoader, SkeletonJson, Spine } from "@pixi-spine/all-3.8";
@@ -179,6 +179,11 @@ export default function Home() {
   // 导入与多路径模拟状态
   const [importedPaths, setImportedPaths] = useState<ImportedPath[]>([]);
   const importedProgressesRef = useRef<Record<string, number>>({});
+
+  // 导入路径编辑状态
+  const [editingImportedPathId, setEditingImportedPathId] = useState<string | null>(null);
+  const [importedSmoothEpsilon, setImportedSmoothEpsilon] = useState(20); // 抽稀平滑容差
+  const [importedAddCount, setImportedAddCount] = useState(20); // 增加坐标点数量
 
   // 全局拖拽导入状态
   const [isDragOver, setIsDragOver] = useState(false);
@@ -389,6 +394,7 @@ export default function Home() {
   const removeImportedPath = (id: string) => {
     setImportedPaths(prev => prev.filter(p => p.id !== id));
     delete importedProgressesRef.current[id];
+    setEditingImportedPathId(prev => prev === id ? null : prev);
   };
 
   const clearAllImportedPaths = () => {
@@ -399,6 +405,23 @@ export default function Home() {
   const updateImportedPath = (id: string, updates: Partial<ImportedPath>) => {
     setImportedPaths(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
   };
+
+  // 导入路径编辑：对 data 做几何变换后，用 calculateAngles 重新计算角度，并停止播放、重置进度
+  const transformImportedPath = useCallback((id: string, fn: (pts: Point[]) => Point[]) => {
+    setImportedPaths(prev => prev.map(p => {
+      if (p.id !== id) return p;
+      const newPts = fn(p.data.map(d => ({ x: d.x, y: d.y })));
+      const newData = calculateAngles(newPts);
+      return { ...p, data: newData, isPlaying: false };
+    }));
+    importedProgressesRef.current[id] = 0;
+  }, []);
+
+  const reverseImportedPath = (id: string) => transformImportedPath(id, pts => [...pts].reverse());
+  const mirrorImportedPathH = (id: string) => transformImportedPath(id, pts => pts.map(p => ({ x: resolution.width - p.x, y: p.y })));
+  const mirrorImportedPathV = (id: string) => transformImportedPath(id, pts => pts.map(p => ({ x: p.x, y: resolution.height - p.y })));
+  const smoothImportedPath = (id: string, epsilon: number) => transformImportedPath(id, pts => douglasPeucker(pts, epsilon));
+  const resampleImportedPath = (id: string, addCount: number) => transformImportedPath(id, pts => resamplePath(pts, addCount));
 
   const playAllImportedPaths = () => {
     setImportedPaths(prev => prev.map(p => ({ ...p, isPlaying: true })));
@@ -1498,6 +1521,51 @@ export default function Home() {
     }
   };
 
+  // 把单条导入路径导出为 .dat 文件，格式与导入时一致：[[x, y, angle], ...]
+  const downloadImportedPath = (id: string) => {
+    const ip = importedPaths.find(p => p.id === id);
+    if (!ip || ip.data.length === 0) return;
+
+    const formatted = ip.data.map(p => [
+      Number(p.x.toFixed(2)),
+      Number(p.y.toFixed(2)),
+      Number(p.angle.toFixed(2))
+    ]);
+    const blob = new Blob([JSON.stringify(formatted)], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    // 用路径名（去扩展名）作为文件名，避免覆盖原始 .dat
+    const baseName = ip.name.replace(/\.[^.]+$/, '') || 'imported';
+    a.download = `${baseName}.dat`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // 批量导出全部导入路径为 .dat 文件
+  const downloadAllImportedPaths = () => {
+    importedPaths.forEach(ip => {
+      if (ip.data.length === 0) return;
+      const formatted = ip.data.map(p => [
+        Number(p.x.toFixed(2)),
+        Number(p.y.toFixed(2)),
+        Number(p.angle.toFixed(2))
+      ]);
+      const blob = new Blob([JSON.stringify(formatted)], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const baseName = ip.name.replace(/\.[^.]+$/, '') || 'imported';
+      a.download = `${baseName}.dat`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+  };
+
   return (
     <div 
       className="h-screen w-screen bg-slate-950 text-slate-300 flex flex-col font-sans overflow-hidden"
@@ -1612,6 +1680,14 @@ export default function Home() {
                             </button>
                             <div className="w-px bg-slate-600 mx-1"></div>
                             <button
+                              onClick={downloadAllImportedPaths}
+                              disabled={importedPaths.length === 0}
+                              className="p-1.5 bg-slate-700 hover:bg-emerald-900/50 text-slate-300 hover:text-emerald-400 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              title="全部导出为 .dat"
+                            >
+                              <FileDown size={14} />
+                            </button>
+                            <button
                               onClick={() => setImportedPaths([])}
                               className="p-1.5 bg-slate-700 hover:bg-red-900/50 text-slate-300 hover:text-red-400 rounded transition-colors"
                               title="全部删除"
@@ -1624,7 +1700,7 @@ export default function Home() {
                         {importedPaths.map(ip => (
                           <div key={ip.id} className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-3 relative group">
                             <div className="flex justify-between items-start">
-                              <div className="flex items-center gap-2 max-w-[80%]">
+                              <div className="flex items-center gap-2 max-w-[70%]">
                                 <div 
                                   className="w-3 h-3 rounded-full shrink-0" 
                                   style={{ backgroundColor: ip.color }}
@@ -1632,14 +1708,36 @@ export default function Home() {
                                 <span className="text-xs font-medium text-slate-300 truncate" title={ip.name}>
                                   {ip.name}
                                 </span>
+                                <span className="text-[10px] text-slate-600 shrink-0">({ip.data.length}点)</span>
                               </div>
-                              <button
-                                onClick={() => removeImportedPath(ip.id)}
-                                className="text-slate-500 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100 absolute top-3 right-3 bg-slate-900 rounded p-0.5"
-                                title="删除"
-                              >
-                                <Trash2 size={12} />
-                              </button>
+                              <div className="flex items-center gap-1 absolute top-3 right-3 bg-slate-900 rounded p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button
+                                  onClick={() => downloadImportedPath(ip.id)}
+                                  disabled={ip.data.length === 0}
+                                  className="p-1 rounded text-slate-500 hover:text-emerald-400 hover:bg-slate-800 transition-colors disabled:opacity-50"
+                                  title="导出为 .dat"
+                                >
+                                  <FileDown size={12} />
+                                </button>
+                                <button
+                                  onClick={() => setEditingImportedPathId(editingImportedPathId === ip.id ? null : ip.id)}
+                                  className={`p-1 rounded transition-colors ${
+                                    editingImportedPathId === ip.id
+                                      ? 'bg-pink-900/40 text-pink-400'
+                                      : 'text-slate-500 hover:text-pink-400 hover:bg-slate-800'
+                                  }`}
+                                  title="编辑"
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                                <button
+                                  onClick={() => removeImportedPath(ip.id)}
+                                  className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-slate-800 transition-colors"
+                                  title="删除"
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              </div>
                             </div>
 
                             <div className="flex items-center gap-3">
@@ -1651,7 +1749,7 @@ export default function Home() {
                                 <input
                                   type="range"
                                   min="1"
-                                  max="100"
+                                  max="500"
                                   value={ip.speed}
                                   onChange={(e) => updateImportedPath(ip.id, { speed: Number(e.target.value) })}
                                   className="w-full accent-amber-500 h-1"
@@ -1687,6 +1785,116 @@ export default function Home() {
                                 ))}
                               </select>
                             </div>
+
+                            {/* 编辑面板 */}
+                            {editingImportedPathId === ip.id && (
+                              <div className="pt-2 border-t border-slate-800/50 space-y-3 bg-slate-900/40 -mx-3 -mb-3 px-3 pb-3 rounded-b-lg">
+                                <div className="flex items-center gap-2 text-[11px] text-pink-400">
+                                  <SlidersHorizontal size={12} />
+                                  <span>路径编辑</span>
+                                </div>
+
+                                {/* 重命名 */}
+                                <div>
+                                  <label className="block text-[10px] text-slate-500 mb-1">名称</label>
+                                  <input
+                                    type="text"
+                                    value={ip.name}
+                                    onChange={(e) => updateImportedPath(ip.id, { name: e.target.value })}
+                                    className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-xs text-slate-200 focus:outline-none focus:border-pink-500 focus:ring-1 focus:ring-pink-500 transition-all"
+                                  />
+                                </div>
+
+                                {/* 几何变换 */}
+                                <div>
+                                  <label className="block text-[10px] text-slate-500 mb-1">几何变换</label>
+                                  <div className="grid grid-cols-3 gap-1.5">
+                                    <button
+                                      onClick={() => reverseImportedPath(ip.id)}
+                                      className="flex flex-col items-center gap-1 py-2 bg-slate-800 hover:bg-pink-900/30 text-slate-300 hover:text-pink-400 border border-slate-700 hover:border-pink-500/50 rounded transition-colors text-[10px]"
+                                      title="反转方向"
+                                    >
+                                      <Repeat size={14} />
+                                      <span>反转</span>
+                                    </button>
+                                    <button
+                                      onClick={() => mirrorImportedPathH(ip.id)}
+                                      className="flex flex-col items-center gap-1 py-2 bg-slate-800 hover:bg-pink-900/30 text-slate-300 hover:text-pink-400 border border-slate-700 hover:border-pink-500/50 rounded transition-colors text-[10px]"
+                                      title="水平镜像"
+                                    >
+                                      <FlipHorizontal size={14} />
+                                      <span>水平镜像</span>
+                                    </button>
+                                    <button
+                                      onClick={() => mirrorImportedPathV(ip.id)}
+                                      className="flex flex-col items-center gap-1 py-2 bg-slate-800 hover:bg-pink-900/30 text-slate-300 hover:text-pink-400 border border-slate-700 hover:border-pink-500/50 rounded transition-colors text-[10px]"
+                                      title="垂直镜像"
+                                    >
+                                      <FlipVertical size={14} />
+                                      <span>垂直镜像</span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* 抽稀平滑 */}
+                                <div>
+                                  <label className="flex justify-between text-[10px] text-slate-500 mb-1">
+                                    <span>抽稀平滑 (Epsilon)</span>
+                                    <span className="text-cyan-400">{importedSmoothEpsilon}</span>
+                                  </label>
+                                  <input
+                                    type="range"
+                                    min="1"
+                                    max="100"
+                                    value={importedSmoothEpsilon}
+                                    onChange={(e) => setImportedSmoothEpsilon(Number(e.target.value))}
+                                    className="w-full accent-cyan-500 h-1"
+                                  />
+                                  <button
+                                    onClick={() => smoothImportedPath(ip.id, importedSmoothEpsilon)}
+                                    disabled={ip.data.length < 3}
+                                    className="w-full mt-2 py-1.5 px-3 bg-slate-800 hover:bg-cyan-900/30 text-slate-300 hover:text-cyan-400 border border-slate-700 hover:border-cyan-500/50 rounded transition-colors text-[11px] disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    应用抽稀
+                                  </button>
+                                </div>
+
+                                {/* 增加坐标点 */}
+                                <div>
+                                  <label className="flex justify-between text-[10px] text-slate-500 mb-1">
+                                    <span>增加坐标点数</span>
+                                    <span className="text-emerald-400">+{importedAddCount}</span>
+                                  </label>
+                                  <input
+                                    type="range"
+                                    min="1"
+                                    max="200"
+                                    value={importedAddCount}
+                                    onChange={(e) => setImportedAddCount(Number(e.target.value))}
+                                    className="w-full accent-emerald-500 h-1"
+                                  />
+                                  <button
+                                    onClick={() => resampleImportedPath(ip.id, importedAddCount)}
+                                    disabled={ip.data.length < 2}
+                                    className="w-full mt-2 py-1.5 px-3 bg-slate-800 hover:bg-emerald-900/30 text-slate-300 hover:text-emerald-400 border border-slate-700 hover:border-emerald-500/50 rounded transition-colors text-[11px] disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    应用增密
+                                  </button>
+                                </div>
+
+                                {/* 保存导出 */}
+                                <div className="pt-1">
+                                  <button
+                                    onClick={() => downloadImportedPath(ip.id)}
+                                    disabled={ip.data.length === 0}
+                                    className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-emerald-900/30 hover:bg-emerald-900/50 text-emerald-400 border border-emerald-500/50 rounded transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    <FileDown size={14} />
+                                    <span>保存为 .dat 文件</span>
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -1999,7 +2207,7 @@ export default function Home() {
                     <input
                       type="range"
                       min="1"
-                      max="100"
+                      max="500"
                       step="1"
                       value={playSpeed}
                       onChange={(e) => setPlaySpeed(Number(e.target.value))}

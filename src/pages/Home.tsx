@@ -27,6 +27,10 @@ interface ImportedPath {
 // 鱼资源支持的文件扩展名
 const FISH_FILE_EXTS = ['.png', '.jpg', '.jpeg', '.atlas', '.json', '.plist'];
 
+// 相邻两点的基础耗时（秒）：速度为 1 时游过相邻两点所需时间。
+// 新算法：相邻两点基础耗时 = 0.085 * 100 = 8.5 秒，实际耗时 = BASE_SEGMENT_TIME / speed。
+const BASE_SEGMENT_TIME = 0.085 * 100;
+
 export default function Home() {
   // 画布尺寸设置
   const [resolution, setResolution] = useState({ width: 1280, height: 720 });
@@ -167,7 +171,7 @@ export default function Home() {
 
   // 模拟游动状态
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playSpeed, setPlaySpeed] = useState(10); // 游动速度（数值越大越快，1表示点到点1秒）
+  const [playSpeed, setPlaySpeed] = useState(10); // 游动速度（数值越大越快；相邻两点耗时 = BASE_SEGMENT_TIME / speed）
   const playProgressRef = useRef(0); // 当前播放进度（在 0 到 pathData.length - 1 之间）
   const lastTimeRef = useRef<number>(0);
   const animationFrameRef = useRef<number>();
@@ -1175,7 +1179,8 @@ export default function Home() {
 
     // 更新主路径鱼的进度
     if (state.isPlaying) {
-      const progressDelta = deltaTime * state.playSpeed;
+      // 相邻两点实际耗时 = BASE_SEGMENT_TIME / speed，故每秒前进的段数 = speed / BASE_SEGMENT_TIME
+      const progressDelta = deltaTime * state.playSpeed / BASE_SEGMENT_TIME;
       playProgressRef.current += progressDelta;
       if (playProgressRef.current >= state.pathDataLength - 1) {
         playProgressRef.current = 0;
@@ -1188,7 +1193,7 @@ export default function Home() {
         if (importedProgressesRef.current[ip.id] === undefined) {
           importedProgressesRef.current[ip.id] = 0;
         }
-        importedProgressesRef.current[ip.id] += deltaTime * ip.speed;
+        importedProgressesRef.current[ip.id] += deltaTime * ip.speed / BASE_SEGMENT_TIME;
         if (importedProgressesRef.current[ip.id] >= ip.data.length - 1) {
           importedProgressesRef.current[ip.id] = 0;
         }
@@ -2001,7 +2006,7 @@ export default function Home() {
                       className="w-full accent-amber-500 mb-3"
                     />
                     <p className="text-[10px] text-slate-600 mb-3 leading-relaxed">
-                      * 速度为 1 表示游过相邻两点耗时 1 秒。值为 10 表示耗时 1/10 秒。
+                      * 相邻两点基础耗时 8.5 秒。速度为 1 表示耗时 8.5 秒，值为 10 表示耗时 0.85 秒。
                     </p>
 
                     <div className="mb-3">

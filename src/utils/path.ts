@@ -200,7 +200,13 @@ export function resampleSegment(points: Point[], startIndex: number, endIndex: n
 
 /**
  * 计算路径中每个点的旋转角度（基于相邻点的切线）
- * 注意：在我们的坐标系中，Y轴向上为正。
+ * 算法与示例 Road.lua 中的角度计算保持一致：
+ *  - 使用前向差分（当前点 -> 下一个点）求切线方向；
+ *  - 当 dx > 0 时：angle = -atan(dy / dx)（度）；
+ *  - 当 dx <= 0 时：angle = -atan(dy / dx) + 180（度）；
+ *  - 最后一个点复用上一个点的角度。
+ * 注意：此处不归一化到 0~360，保留与示例一致的原始取值范围（-90~270），
+ * 下游的旋转与插值均按模 360 处理，因此不受影响。
  * @param points 路径坐标点
  * @returns 包含角度的路径点集
  */
@@ -208,35 +214,32 @@ export function calculateAngles(points: Point[]): PathPoint[] {
   if (points.length === 0) return [];
   if (points.length === 1) return [{ ...points[0], angle: 0 }];
 
-  return points.map((p, i) => {
-    let dx = 0;
-    let dy = 0;
+  const result: PathPoint[] = [];
 
-    if (i === 0) {
-      // 起点：使用下一个点
-      dx = points[1].x - p.x;
-      dy = points[1].y - p.y;
-    } else if (i === points.length - 1) {
-      // 终点：使用上一个点
-      dx = p.x - points[i - 1].x;
-      dy = p.y - points[i - 1].y;
+  for (let i = 0; i < points.length; i++) {
+    let angle: number;
+
+    if (i === points.length - 1) {
+      // 最后一个点：复用上一个点的角度（与示例 Road.lua 一致）
+      angle = result[i - 1].angle;
     } else {
-      // 中间点：使用前后点的差值（中心差分）
-      dx = points[i + 1].x - points[i - 1].x;
-      dy = points[i + 1].y - points[i - 1].y;
+      // 其余点：前向差分（当前点 -> 下一个点）
+      const dx = points[i + 1].x - points[i].x;
+      const dy = points[i + 1].y - points[i].y;
+
+      if (dx === 0 && dy === 0) {
+        // 两个点完全重合时避免 NaN，复用上一个点的角度
+        angle = i > 0 ? result[i - 1].angle : 0;
+      } else {
+        const base = -Math.atan(dy / dx) * (180 / Math.PI);
+        angle = dx > 0 ? base : base + 180;
+      }
     }
 
-    // Math.atan2 范围为 -PI 到 PI，将其转换为 0-360 度
-    // 因为现在 Y轴是向上的正坐标，所以我们直接取反 dy 的符号来获得与传统计算机视觉相同的角度定义（向下为正，顺时针增加）
-    // 或者，如果我们希望按照数学系（逆时针为正），则不需要取反。这里我们保持输出数据的角度与视觉一致：
-    // 即当鱼头朝向右下角时，角度为正值（顺时针）
-    let angle = Math.atan2(-dy, dx) * (180 / Math.PI);
-    if (angle < 0) {
-      angle += 360;
-    }
+    result.push({ ...points[i], angle });
+  }
 
-    return { ...p, angle };
-  });
+  return result;
 }
 
 /**

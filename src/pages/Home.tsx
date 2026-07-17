@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { MousePointer2, MousePointerClick, PenTool, Trash2, Download, Settings, Copy, Check, Fish, Undo, Redo, FlipHorizontal, FlipVertical, Repeat, FileDown, ImageDown, Play, Square, ChevronDown, ChevronRight, Upload, Pencil, SlidersHorizontal } from 'lucide-react';
-import { Point, PathPoint, douglasPeucker, calculateAngles, bezierSpline, resamplePath, resampleSegment } from '../utils/path';
+import { Point, PathPoint, douglasPeucker, calculateAngles, bezierSpline, resamplePath, resampleSegment, sanitizePath } from '../utils/path';
 import * as PIXI from "pixi.js";
 import { TextureAtlas, AtlasAttachmentLoader, SkeletonJson, Spine } from "@pixi-spine/all-3.8";
 import { AtlasAttachmentLoader as AtlasAttachmentLoader37, SkeletonJson as SkeletonJson37, Spine as Spine37 } from "@pixi-spine/runtime-3.7";
@@ -233,11 +233,10 @@ export default function Home() {
         const text = await file.text();
         const json = JSON.parse(text);
         if (Array.isArray(json)) {
-          const data: PathPoint[] = json.map((item: number[]) => ({
-            x: item[0],
-            y: item[1],
-            angle: item[2]
-          }));
+          const raw: Point[] = json.map((item: number[]) => ({ x: item[0], y: item[1] }));
+          // 修复离群长段（如急转弯处样条过冲留下的跳点），再重算角度，
+          // 保证导入后的路径在游戏 fishMove（每段固定耗时）下不会瞬移。
+          const data: PathPoint[] = calculateAngles(sanitizePath(raw));
           const id = Math.random().toString(36).substring(2, 9);
           newPaths.push({
             id,
@@ -406,11 +405,11 @@ export default function Home() {
     setImportedPaths(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
   };
 
-  // 导入路径编辑：对 data 做几何变换后，用 calculateAngles 重新计算角度，并停止播放、重置进度
+  // 导入路径编辑：对 data 做几何变换后，修复离群长段并用 calculateAngles 重新计算角度，停止播放、重置进度
   const transformImportedPath = useCallback((id: string, fn: (pts: Point[]) => Point[]) => {
     setImportedPaths(prev => prev.map(p => {
       if (p.id !== id) return p;
-      const newPts = fn(p.data.map(d => ({ x: d.x, y: d.y })));
+      const newPts = sanitizePath(fn(p.data.map(d => ({ x: d.x, y: d.y }))));
       const newData = calculateAngles(newPts);
       return { ...p, data: newData, isPlaying: false };
     }));
@@ -1485,8 +1484,9 @@ export default function Home() {
     
     const fileName = exportFilename || 'path00001';
 
-    // 1. 导出路径数据
-    const formattedData = pathData.map(p => [
+    // 1. 导出路径数据（先修复离群长段并重算角度，保证游戏 fishMove 不瞬移）
+    const exportPath = calculateAngles(sanitizePath(pathData.map(p => ({ x: p.x, y: p.y }))));
+    const formattedData = exportPath.map(p => [
       Number(p.x.toFixed(2)),
       Number(p.y.toFixed(2)),
       Number(p.angle.toFixed(2))
@@ -1526,7 +1526,9 @@ export default function Home() {
     const ip = importedPaths.find(p => p.id === id);
     if (!ip || ip.data.length === 0) return;
 
-    const formatted = ip.data.map(p => [
+    // 修复离群长段并重算角度，保证导出的 .dat 在游戏中不出现瞬移/角度突变
+    const exportPath = calculateAngles(sanitizePath(ip.data.map(p => ({ x: p.x, y: p.y }))));
+    const formatted = exportPath.map(p => [
       Number(p.x.toFixed(2)),
       Number(p.y.toFixed(2)),
       Number(p.angle.toFixed(2))
@@ -1548,7 +1550,9 @@ export default function Home() {
   const downloadAllImportedPaths = () => {
     importedPaths.forEach(ip => {
       if (ip.data.length === 0) return;
-      const formatted = ip.data.map(p => [
+      // 修复离群长段并重算角度，保证导出的 .dat 在游戏中不出现瞬移/角度突变
+      const exportPath = calculateAngles(sanitizePath(ip.data.map(p => ({ x: p.x, y: p.y }))));
+      const formatted = exportPath.map(p => [
         Number(p.x.toFixed(2)),
         Number(p.y.toFixed(2)),
         Number(p.angle.toFixed(2))

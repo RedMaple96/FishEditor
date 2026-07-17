@@ -243,6 +243,54 @@ export function calculateAngles(points: Point[]): PathPoint[] {
 }
 
 /**
+ * 修复路径中的离群长段（异常跳点）。
+ *
+ * 背景：示例 Road.lua 的 screenDot 只强制「相邻点最小距离」，
+ * 但不限制最大距离，因此样条在急转弯处的过冲会在结果中留下
+ * 一段远大于正常间距的「跳点」（如 1018.dat 中 200px 的跳变）。
+ * 而游戏 fishMove 对每段使用固定耗时（0.085*100/speed），
+ * 一旦存在离群长段，鱼会在该段瞬间加速/瞬移，且角度突变。
+ *
+ * 本函数补充「最大距离」约束：对长度超过「中位段长 × threshold」的段，
+ * 按中位间距线性细分插值，使整条路径的相邻点间距趋于均匀，
+ * 与示例 screenDot 的「最小距离」约束共同形成均匀采样的输出。
+ * 正常（均匀）路径不受影响。
+ *
+ * @param points 路径坐标点
+ * @param threshold 离群判定倍数（段长 > 中位段长 × threshold 即细分），默认 3
+ * @returns 修复后的点集（仅含 x/y，角度需由 calculateAngles 重算）
+ */
+export function sanitizePath(points: Point[], threshold: number = 3): Point[] {
+  if (points.length < 3) return points;
+
+  const segs: number[] = [];
+  for (let i = 1; i < points.length; i++) {
+    segs.push(Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y));
+  }
+  const sorted = [...segs].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] || 0;
+  if (median <= 0) return points;
+  const maxLen = median * threshold;
+
+  const result: Point[] = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const d = segs[i - 1];
+    if (d > maxLen) {
+      const n = Math.max(2, Math.round(d / median));
+      for (let k = 1; k < n; k++) {
+        const t = k / n;
+        result.push({
+          x: points[i - 1].x + (points[i].x - points[i - 1].x) * t,
+          y: points[i - 1].y + (points[i].y - points[i - 1].y) * t
+        });
+      }
+    }
+    result.push(points[i]);
+  }
+  return result;
+}
+
+/**
  * 贝塞尔曲线长度和采样辅助函数
  */
 function getBezierPoint(p0: Point, cp1: Point, cp2: Point, p3: Point, t: number): Point {
